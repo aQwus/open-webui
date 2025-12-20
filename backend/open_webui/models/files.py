@@ -19,6 +19,7 @@ class File(Base):
     __tablename__ = "file"
     id = Column(String, primary_key=True, unique=True)
     user_id = Column(String)
+    user_email = Column(String, nullable=True)  # For Supabase sync
     hash = Column(Text, nullable=True)
 
     filename = Column(Text)
@@ -38,6 +39,7 @@ class FileModel(BaseModel):
 
     id: str
     user_id: str
+    user_email: Optional[str] = None
     hash: Optional[str] = None
 
     filename: str

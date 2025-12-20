@@ -51,6 +51,9 @@ from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_access
 from open_webui.utils.headers import include_user_info_headers
 
+# Import Gemini service for RAG
+from open_webui.services.gemini_service import gemini_service
+
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["OPENAI"])
@@ -913,6 +916,44 @@ async def generate_chat_completion(
         request_url = f"{request_url}/chat/completions?api-version={api_version}"
     else:
         request_url = f"{url}/chat/completions"
+
+    ##########################################################
+    # RAG: Retrieve context from Gemini File Storage
+    ##########################################################
+    try:
+        # Extract the last user message as the query
+        messages = payload.get("messages", [])
+        user_query = None
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    user_query = content
+                elif isinstance(content, list):
+                    user_query = " ".join(
+                        part.get("text", "") for part in content if isinstance(part, dict) and "text" in part
+                    )
+                break
+        
+        if user_query and gemini_service.is_enabled():
+            log.info(f"RAG: Attempting context retrieval for user {user.id}")
+            context = gemini_service.retrieve_context(user_query, user.id)
+            
+            if context:
+                augmented_content = f"Context:\n{context}\n\nUser Query:\n{user_query}"
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "user":
+                        messages[i]["content"] = augmented_content
+                        break
+                payload["messages"] = messages
+                log.info(f"RAG: Successfully augmented prompt with context (length: {len(context)} chars)")
+                log.info(f"RAG: Context preview:\n{context[:500]}...")
+            else:
+                log.info("RAG: No context retrieved, proceeding with original query")
+                
+    except Exception as e:
+        log.error(f"RAG: Error during context retrieval: {e}")
+        log.info("RAG: Proceeding with original query")
 
     payload = json.dumps(payload)
 

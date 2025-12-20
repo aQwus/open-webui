@@ -1,12 +1,12 @@
 services:
-  ollama:
-    volumes:
-      - ollama:/root/.ollama
-    container_name: ollama
-    pull_policy: always
-    tty: true
-    restart: unless-stopped
-    image: ollama/ollama:${OLLAMA_DOCKER_TAG-latest}
+  # ollama:
+  #   volumes:
+  #     - ollama:/root/.ollama
+  #   container_name: ollama
+  #   pull_policy: always
+  #   tty: true
+  #   restart: unless-stopped
+  #   image: ollama/ollama:${OLLAMA_DOCKER_TAG-latest}
 
   open-webui:
     build:
@@ -16,17 +16,30 @@ services:
     container_name: open-webui
     volumes:
       - open-webui:/app/backend/data
-    depends_on:
-      - ollama
+    # depends_on:
+    #   - ollama
     ports:
       - ${OPEN_WEBUI_PORT-3000}:8080
+    env_file:
+      - .env
     environment:
-      - 'OLLAMA_BASE_URL=http://ollama:11434'
+      # - 'OLLAMA_BASE_URL=http://ollama:11434'
       - 'WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}'
+      - 'GEMINI_API_KEY=${GEMINI_API_KEY}'
+
+      # ===== HARD DISABLE OLLAMA =====
+      - ENABLE_OLLAMA=false
+      - OLLAMA_BASE_URL=""
+
+      # ===== DISABLE ARENA MODEL =====
+      - ENABLE_EVALUATION_ARENA_MODELS=false
+
+      # ===== MODEL RESTRICTION =====
+      - DEFAULT_MODELS=gpt-5.2
     extra_hosts:
       - host.docker.internal:host-gateway
     restart: unless-stopped
 
 volumes:
-  ollama: {}
+  # ollama: {}
   open-webui: {}

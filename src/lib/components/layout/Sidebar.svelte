@@ -54,6 +54,7 @@
 	import { getChannels, createNewChannel } from '$lib/apis/channels';
 	import ChannelModal from './Sidebar/ChannelModal.svelte';
 	import ChannelItem from './Sidebar/ChannelItem.svelte';
+	import DocumentsModal from './Sidebar/DocumentsModal.svelte';
 	import PencilSquare from '../icons/PencilSquare.svelte';
 	import Search from '../icons/Search.svelte';
 	import SearchModal from './SearchModal.svelte';
@@ -61,6 +62,7 @@
 	import Sidebar from '../icons/Sidebar.svelte';
 	import PinnedModelList from './Sidebar/PinnedModelList.svelte';
 	import Note from '../icons/Note.svelte';
+	import Document from '../icons/Document.svelte';
 	import { slide } from 'svelte/transition';
 	import HotkeyHint from '../common/HotkeyHint.svelte';
 	import { key } from 'vega';
@@ -74,6 +76,7 @@
 
 	let selectedChatId = null;
 	let showCreateChannel = false;
+	let showDocumentsModal = false;
 
 	// Pagination variables
 	let chatListLoading = false;
@@ -533,6 +536,8 @@
 	}}
 />
 
+<DocumentsModal bind:show={showDocumentsModal} />
+
 <!-- svelte-ignore a11y-no-static-element-interactions -->
 
 {#if $showSidebar}
@@ -978,6 +983,21 @@
 						{/each}
 					</Folder>
 				{/if}
+
+				<!-- Documents Section -->
+				<Folder
+					id="sidebar-documents"
+					className="px-2 mt-0.5"
+					name={$i18n.t('Documents')}
+					chevron={false}
+					dragAndDrop={false}
+					onAdd={() => {
+						showDocumentsModal = true;
+					}}
+					onAddLabel={$i18n.t('Manage Documents')}
+				>
+					<!-- Empty for now, content will be added later -->
+				</Folder>
 
 				{#if $config?.features?.enable_folders && ($user?.role === 'admin' || ($user?.permissions?.features?.folders ?? true))}
 					<Folder

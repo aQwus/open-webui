@@ -1037,7 +1037,17 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_API_BASE_URL = os.environ.get("OPENAI_API_BASE_URL", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+
+# Gemini RAG configuration
+TOP_K = int(os.environ.get("TOP_K", "5"))
+GEMINI_MODEL1 = os.environ.get("MODEL1", "gemini-2.5-flash")
+GEMINI_MODEL2 = os.environ.get("MODEL2", "gemini-2.5-flash-lite")
+GEMINI_MODEL3 = os.environ.get("MODEL3", "gemini-2.0-flash")
 GEMINI_API_BASE_URL = os.environ.get("GEMINI_API_BASE_URL", "")
+
+# Supabase configuration for document metadata sync
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
 
 if OPENAI_API_BASE_URL == "":

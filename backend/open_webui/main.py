@@ -83,6 +83,7 @@ from open_webui.routers import (
     configs,
     groups,
     files,
+    documents,
     functions,
     memories,
     models,
@@ -653,6 +654,19 @@ app.state.redis = None
 
 app.state.WEBUI_NAME = WEBUI_NAME
 app.state.LICENSE_METADATA = None
+
+# Validate Supabase connection on startup
+from open_webui.services.supabase_service import supabase_service
+
+if supabase_service.is_enabled():
+    log.info("Validating Supabase connection for document metadata sync...")
+    if supabase_service.validate_connection():
+        log.info("✓ Supabase connection validated successfully")
+    else:
+        log.error("✗ Supabase connection validation failed - metadata sync will not work")
+        log.error("Please check your SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY configuration")
+else:
+    log.info("Supabase not configured (metadata sync disabled)")
 
 
 ########################################
@@ -1393,6 +1407,7 @@ app.include_router(memories.router, prefix="/api/v1/memories", tags=["memories"]
 app.include_router(folders.router, prefix="/api/v1/folders", tags=["folders"])
 app.include_router(groups.router, prefix="/api/v1/groups", tags=["groups"])
 app.include_router(files.router, prefix="/api/v1/files", tags=["files"])
+app.include_router(documents.router, prefix="/api/v1/documents", tags=["documents"])
 app.include_router(functions.router, prefix="/api/v1/functions", tags=["functions"])
 app.include_router(
     evaluations.router, prefix="/api/v1/evaluations", tags=["evaluations"]
@@ -2228,7 +2243,7 @@ async def get_manifest_json():
         return {
             "name": app.state.WEBUI_NAME,
             "short_name": app.state.WEBUI_NAME,
-            "description": f"{app.state.WEBUI_NAME} is an open, extensible, user-friendly interface for AI that adapts to your workflow.",
+            "description": f"{app.state.WEBUI_NAME} is an extensible, user-friendly interface for AI.",
             "start_url": "/",
             "display": "standalone",
             "background_color": "#343541",
