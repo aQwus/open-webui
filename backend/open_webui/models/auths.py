@@ -81,6 +81,45 @@ class AddUserForm(SignupForm):
 
 
 class AuthsTable:
+    def _find_existing_user_id(self, email: str) -> Optional[str]:
+        """
+        Check Supabase 'users' table for existing user_id associated with this email.
+        
+        Strategy: Query users table directly for user record with this email.
+        If Supabase is unavailable, raises exception to block signup.
+        
+        Returns:
+            Existing user_id if found, None if truly new user
+            
+        Raises:
+            Exception if Supabase is unavailable (to ensure one user per email)
+        """
+        from open_webui.services.supabase_service import supabase_service
+        
+        if not supabase_service.is_enabled():
+            raise Exception("User registration requires Supabase to be available")
+        
+        try:
+            # Query Supabase users table for existing user with this email
+            response = (supabase_service.client.table('users')
+                .select('user_id')
+                .eq('user_email', email.lower())
+                .limit(1)
+                .execute())
+            
+            if response.data and len(response.data) > 0:
+                existing_id = response.data[0].get('user_id')
+                log.info(f"Found existing user_id in Supabase users table: {existing_id}")
+                return existing_id
+            else:
+                log.debug(f"No existing user found for {email} - this is a new user")
+                return None
+                
+        except Exception as e:
+            log.error(f"Error checking Supabase users table: {e}")
+            # Do NOT fallback - raise exception to block signup
+            raise Exception(f"User registration temporarily unavailable: {str(e)}")
+    
     def insert_new_auth(
         self,
         email: str,
@@ -93,7 +132,31 @@ class AuthsTable:
         with get_db() as db:
             log.info("insert_new_auth")
 
-            id = str(uuid.uuid4())
+            # Try to find existing user_id from Supabase
+            try:
+                existing_user_id = self._find_existing_user_id(email)
+                
+                if existing_user_id:
+                    log.info(f"Reusing existing user_id for {email}: {existing_user_id}")
+                    id = existing_user_id
+                    
+                    # Update updated_at timestamp for returning user
+                    try:
+                        from open_webui.services.supabase_service import supabase_service
+                        from datetime import datetime
+                        supabase_service.client.table('users').update({
+                            'updated_at': datetime.now().isoformat()
+                        }).eq('user_id', id).execute()
+                        log.info(f"Updated timestamp for returning user: {email}")
+                    except Exception as e:
+                        log.warning(f"Failed to update timestamp (non-blocking): {e}")
+                else:
+                    log.info(f"Creating new user_id for {email}")
+                    id = str(uuid.uuid4())
+            except Exception as e:
+                # Supabase unavailable - block signup
+                log.error(f"Cannot create user, Supabase unavailable: {e}")
+                raise  # Re-raise to propagate HTTP 503 error
 
             auth = AuthModel(
                 **{"id": id, "email": email, "password": password, "active": True}
@@ -109,6 +172,23 @@ class AuthsTable:
             db.refresh(result)
 
             if result and user:
+                # Sync new user to Supabase users table
+                try:
+                    if not existing_user_id:  # Only for truly new users
+                        from open_webui.services.supabase_service import supabase_service
+                        from datetime import datetime
+                        current_time = datetime.now().isoformat()
+                        
+                        supabase_service.client.table('users').insert({
+                            'user_id': id,
+                            'user_email': email.lower(),
+                            'created_at': current_time,
+                            'updated_at': current_time,
+                        }).execute()
+                        log.info(f"Synced new user to Supabase: {email}")
+                except Exception as e:
+                    log.warning(f"Failed to sync user to Supabase (non-blocking): {e}")
+                
                 return user
             else:
                 return None
