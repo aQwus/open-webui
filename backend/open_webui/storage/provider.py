@@ -24,6 +24,11 @@ from open_webui.config import (
     AZURE_STORAGE_ENDPOINT,
     AZURE_STORAGE_CONTAINER_NAME,
     AZURE_STORAGE_KEY,
+    R2_ENDPOINT,
+    R2_ACCESS_KEY_ID,
+    R2_SECRET_ACCESS_KEY,
+    R2_BUCKET,
+    R2_REGION,
     STORAGE_PROVIDER,
     UPLOAD_DIR,
 )
@@ -357,6 +362,106 @@ class AzureStorageProvider(StorageProvider):
 
         # Always delete from local storage
         LocalStorageProvider.delete_all_files()
+
+
+class R2StorageProvider(StorageProvider):
+    """
+    Cloudflare R2 Storage Provider (S3-compatible).
+    Used for document persistence across deployments.
+    """
+    
+    def __init__(self):
+        """Initialize R2 client with Cloudflare R2 credentials."""
+        config = Config(
+            request_checksum_calculation="when_required",
+            response_checksum_validation="when_required",
+        )
+        
+        if not all([R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET]):
+            raise RuntimeError(
+                "R2 storage requires R2_ENDPOINT, R2_ACCESS_KEY_ID, "
+                "R2_SECRET_ACCESS_KEY, and R2_BUCKET to be configured"
+            )
+        
+        self.s3_client = boto3.client(
+            "s3",
+            region_name=R2_REGION,
+            endpoint_url=R2_ENDPOINT,
+            aws_access_key_id=R2_ACCESS_KEY_ID,
+            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+            config=config,
+        )
+        
+        self.bucket_name = R2_BUCKET
+        log.info(f"R2 Storage initialized with bucket: {self.bucket_name}")
+    
+    def upload_file(
+        self, file: BinaryIO, filename: str, tags: Dict[str, str]
+    ) -> Tuple[bytes, str]:
+        """Upload file to R2 storage."""
+        try:
+            # Read file contents
+            contents = file.read()
+            if not contents:
+                raise ValueError(ERROR_MESSAGES.EMPTY_CONTENT)
+            
+            # Reset file pointer for potential re-reading
+            file.seek(0)
+            
+            # Upload directly to R2 (no local temp needed)
+            self.s3_client.put_object(
+                Bucket=self.bucket_name,
+                Key=filename,
+                Body=contents,
+            )
+            
+            r2_path = filename  # Storage-agnostic path
+            log.info(f"Uploaded file to R2: {filename}")
+            return contents, r2_path
+            
+        except ClientError as e:
+            log.error(f"R2 upload failed: {e}")
+            raise RuntimeError(f"Failed to upload file to R2 storage: {str(e)}")
+    
+    def get_file(self, file_path: str) -> str:
+        """Download file from R2 to local temp storage."""
+        try:
+            local_file_path = f"{UPLOAD_DIR}/{file_path.split('/')[-1]}"
+            self.s3_client.download_file(self.bucket_name, file_path, local_file_path)
+            log.debug(f"Downloaded file from R2: {file_path}")
+            return local_file_path
+        except ClientError as e:
+            log.error(f"R2 download failed: {e}")
+            raise RuntimeError(f"Failed to download file from R2 storage: {str(e)}")
+    
+    def delete_file(self, file_path: str) -> None:
+        """Delete file from R2 storage."""
+        try:
+            self.s3_client.delete_object(Bucket=self.bucket_name, Key=file_path)
+            log.info(f"Deleted file from R2: {file_path}")
+        except ClientError as e:
+            log.error(f"R2 delete failed: {e}")
+            raise RuntimeError(f"Failed to delete file from R2 storage: {str(e)}")
+    
+    def delete_all_files(self) -> None:
+        """Delete all files from R2 storage (not typically used)."""
+        try:
+            # List all objects
+            response = self.s3_client.list_objects_v2(Bucket=self.bucket_name)
+            
+            if 'Contents' in response:
+                # Delete all objects
+                objects = [{'Key': obj['Key']} for obj in response['Contents']]
+                self.s3_client.delete_objects(
+                    Bucket=self.bucket_name,
+                    Delete={'Objects': objects}
+                )
+                log.info(f"Deleted {len(objects)} files from R2")
+        except ClientError as e:
+            log.error(f"R2 delete_all failed: {e}")
+            raise RuntimeError(f"Failed to delete all files from R2 storage: {str(e)}")
+
+
 
 
 def get_storage_provider(storage_provider: str):

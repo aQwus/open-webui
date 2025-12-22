@@ -18,7 +18,8 @@ from fastapi import (
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.models.files import FileForm, FileModel, Files
-from open_webui.storage.provider import Storage
+from open_webui.storage.provider import Storage, R2StorageProvider
+from open_webui.config import UPLOAD_DIR
 from open_webui.utils.auth import get_verified_user
 from open_webui.services.gemini_service import gemini_service
 from open_webui.services.supabase_service import supabase_service
@@ -27,6 +28,14 @@ log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MODELS"])
 
 router = APIRouter()
+
+# Initialize R2 storage for documents
+try:
+    r2_storage = R2StorageProvider()
+    log.info("R2 storage initialized successfully for documents")
+except Exception as e:
+    log.error(f"Failed to initialize R2 storage: {e}")
+    r2_storage = None
 
 # File upload constraints
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100 MB in bytes
@@ -160,68 +169,98 @@ async def upload_document(
         # Store file in documents/{user_id}/ directory
         file_path = f"documents/{user.id}/{storage_filename}"
         
-        # Ensure the directory exists before uploading
-        from open_webui.config import UPLOAD_DIR
-        full_dir_path = Path(UPLOAD_DIR) / "documents" / user.id
-        full_dir_path.mkdir(parents=True, exist_ok=True)
-        
-        # Upload to storage
-        Storage.upload_file(
-            file.file,
-            file_path,
-            {
-                "OpenWebUI-User-Email": user.email,
-                "OpenWebUI-User-Id": user.id,
-                "OpenWebUI-User-Name": user.name,
-                "OpenWebUI-File-Id": file_id,
-            },
-        )
-        
         # ====================================================================
-        # TRANSACTIONAL UPLOAD FLOW: Gemini → Supabase → Local DB
-        # Order changed to get Gemini IDs first before storing metadata
-        # Any failure triggers complete rollback including filesystem cleanup
+        # TRANSACTIONAL UPLOAD FLOW: R2 → Gemini → Supabase (No Local DB)
+        # Documents stored in R2 and Supabase for persistence
+        # Any failure triggers complete rollback
         # ====================================================================
         
-        # Step 1: Upload to Gemini File Storage (get IDs first)
-        log.info(f"Step 1/3: Uploading document {file_id} to Gemini")
+        # Check R2 availability
+        if not r2_storage:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Storage service temporarily unavailable. Please try again later.",
+            )
+        
+        # Additional R2 file size check (5GB limit)
+        MAX_R2_FILE_SIZE = 5 * 1024 * 1024 * 1024  # 5GB
+        if file_size > MAX_R2_FILE_SIZE:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="File exceeds 5GB storage limit. Please upload a smaller file.",
+            )
+        
+        # Step 1: Upload to R2 Storage
+        log.info(f"Step 1/3: Uploading document {file_id} to R2")
+        r2_file_contents = None
+        
+        try:
+            r2_file_contents, r2_path = r2_storage.upload_file(
+                file.file,
+                file_path,
+                {
+                    "OpenWebUI-User-Email": user.email,
+                    "OpenWebUI-User-Id": user.id,
+                    "OpenWebUI-File-Id": file_id,
+                },
+            )
+            log.info(f"✓ Step 1/3: Successfully uploaded to R2: {file_path}")
+            
+        except Exception as e:
+            log.error(f"✗ Step 1/3 failed: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to upload document to storage: {str(e)}",
+            )
+        
+        # Step 2: Upload to Gemini File Storage (get IDs)
+        log.info(f"Step 2/3: Uploading document {file_id} to Gemini")
         gemini_file_id = None
         gemini_store_id = None
         
         if gemini_service.is_enabled():
             try:
+                # Save R2 file contents to temp for Gemini upload
+                temp_file_path = Path(UPLOAD_DIR) / storage_filename
+                with open(temp_file_path, "wb") as f:
+                    f.write(r2_file_contents)
+                
                 gemini_result = gemini_service.upload_file_to_gemini(
-                    file_path=file_path,
+                    file_path=str(temp_file_path),
                     filename=safe_filename,  # Use sanitized filename
                     user_id=user.id,
                     document_id=file_id
                 )
                 
+                # Clean up temp file
+                if temp_file_path.exists():
+                    temp_file_path.unlink()
+                
                 if gemini_result:
                     gemini_file_id, gemini_store_id = gemini_result
-                    log.info(f"✓ Step 1/3: Successfully uploaded to Gemini: {gemini_file_id}")
+                    log.info(f"✓ Step 2/3: Successfully uploaded to Gemini: {gemini_file_id}")
                 else:
                     raise Exception("Gemini upload returned None")
                     
             except Exception as e:
-                log.error(f"✗ Step 1/3 failed: {e}")
+                log.error(f"✗ Step 2/3 failed: {e}")
                 
-                # ROLLBACK: Delete file from filesystem
+                # ROLLBACK: Delete file from R2
                 try:
-                    Storage.delete_file(file_path)
-                    log.info(f"Rolled back: Deleted file from filesystem: {file_path}")
+                    r2_storage.delete_file(file_path)
+                    log.info(f"Rolled back: Deleted file from R2: {file_path}")
                 except Exception as rollback_error:
-                    log.error(f"CRITICAL: Filesystem rollback failed: {rollback_error}")
+                    log.error(f"CRITICAL: R2 rollback failed: {rollback_error}")
                 
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=ERROR_MESSAGES.DEFAULT(f"Gemini upload failed: {str(e)}"),
+                    detail=f"Failed to upload document to storage: {str(e)}",
                 )
         else:
-            log.warning("Gemini service not enabled, skipping step 1/3")
+            log.warning("Gemini service not enabled, skipping step 2/3")
         
-        # Step 2: Sync to Supabase (with Gemini IDs)
-        log.info(f"Step 2/3: Syncing document {file_id} to Supabase")
+        # Step 3: Save to Supabase (with Gemini IDs) - ONLY metadata storage
+        log.info(f"Step 3/3: Saving document {file_id} to Supabase")
         if supabase_service.is_enabled():
             try:
                 supabase_data = {
@@ -243,10 +282,10 @@ async def upload_document(
                 }
                 
                 supabase_service.insert_document_metadata(supabase_data)
-                log.info(f"✓ Step 2/3: Successfully synced to Supabase")
+                log.info(f"✓ Step 3/3: Successfully saved to Supabase")
                 
             except Exception as e:
-                log.error(f"✗ Step 2/3 failed: {e}")
+                log.error(f"✗ Step 3/3 failed: {e}")
                 
                 # ROLLBACK: Delete from Gemini
                 try:
@@ -259,57 +298,20 @@ async def upload_document(
                 except Exception as rollback_error:
                     log.error(f"CRITICAL: Gemini rollback failed: {rollback_error}")
                 
-                # ROLLBACK: Delete file from filesystem
+                # ROLLBACK: Delete file from R2
                 try:
-                    Storage.delete_file(file_path)
-                    log.info(f"Rolled back: Deleted file from filesystem: {file_path}")
+                    r2_storage.delete_file(file_path)
+                    log.info(f"Rolled back: Deleted file from R2: {file_path}")
                 except Exception as rollback_error:
-                    log.error(f"CRITICAL: Filesystem rollback failed: {rollback_error}")
+                    log.error(f"CRITICAL: R2 rollback failed: {rollback_error}")
                 
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=ERROR_MESSAGES.DEFAULT(f"Supabase sync failed: {str(e)}"),
+                    detail=f"Failed to save document metadata: {str(e)}",
                 )
         else:
-            log.warning("Supabase not enabled, skipping step 2/3")
-        
-        # Step 3: Save to Local DB (with all IDs)
-        log.info(f"Step 3/3: Saving document {file_id} to local database")
-        try:
-            file_item = Files.insert_new_file(
-                user.id,
-                FileForm(
-                    id=file_id,
-                    filename=safe_filename,  # Use sanitized filename
-                    path=file_path,
-                    user_email=user.email,
-                    data={},
-                    meta={
-                        "name": safe_filename,  # Use sanitized filename
-                        "content_type": file.content_type or "application/octet-stream",
-                        "size": file_size,
-                        "source": "documents",
-                        "gemini_file_id": gemini_file_id,
-                        "gemini_store_id": gemini_store_id,
-                    },
-                ),
-            )
-            
-            if not file_item:
-                raise Exception("Failed to insert file into database")
-            
-            log.info(f"✓ Step 3/3: Successfully saved to local DB")
-            
-        except Exception as e:
-            log.error(f"✗ Step 3/3 failed: {e}")
-            
-            # ROLLBACK: Delete from Supabase
-            try:
-                if supabase_service.is_enabled():
-                    supabase_service.delete_document_metadata(file_id)
-                    log.info(f"Rolled back: Deleted document from Supabase")
-            except Exception as rollback_error:
-                log.error(f"CRITICAL: Supabase rollback failed: {rollback_error}")
+            # Supabase is REQUIRED for documents
+            log.error("Supabase not enabled - cannot save document metadata")
             
             # ROLLBACK: Delete from Gemini
             try:
@@ -322,26 +324,26 @@ async def upload_document(
             except Exception as rollback_error:
                 log.error(f"CRITICAL: Gemini rollback failed: {rollback_error}")
             
-            # ROLLBACK: Delete file from filesystem
+            # ROLLBACK: Delete file from R2
             try:
-                Storage.delete_file(file_path)
-                log.info(f"Rolled back: Deleted file from filesystem: {file_path}")
+                r2_storage.delete_file(file_path)
+                log.info(f"Rolled back: Deleted file from R2: {file_path}")
             except Exception as rollback_error:
-                log.error(f"CRITICAL: Filesystem rollback failed: {rollback_error}")
+                log.error(f"CRITICAL: R2 rollback failed: {rollback_error}")
             
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=ERROR_MESSAGES.DEFAULT(f"Failed to save document to database: {str(e)}"),
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Document service temporarily unavailable. Please try again later.",
             )
         
         # SUCCESS: All steps completed
-        log.info(f"✓ Document {file_id} successfully uploaded to all systems")
+        log.info(f"✓ Document {file_id} successfully uploaded and saved")
         return {
-            "id": file_item.id,
-            "filename": file_item.filename,
+            "id": file_id,
+            "filename": safe_filename,
             "size": file_size,
-            "content_type": file.content_type,
-            "created_at": file_item.created_at,
+            "content_type": file.content_type or "application/octet-stream",
+            "created_at": int(time.time() * 1_000_000_000),
             "message": "Document uploaded successfully",
         }
             
@@ -351,7 +353,7 @@ async def upload_document(
         log.exception(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ERROR_MESSAGES.DEFAULT("Error uploading document"),
+            detail="Error uploading document",
         )
 
 
@@ -363,37 +365,33 @@ async def upload_document(
 @router.get("/")
 async def list_documents(user=Depends(get_verified_user)):
     """
-    Get all documents for the current user.
-    Returns only files with source='documents' tag.
+    Get all documents for the current user from Supabase.
+    Returns documents ordered by created_at descending.
     """
     try:
-        # Get all files for the user
-        all_files = Files.get_files_by_user_id(user.id)
+        # Query Supabase for user's documents
+        documents_data = supabase_service.list_user_documents(user.id)
         
-        # Filter only documents (files with source='documents' in meta)
-        documents = [
-            {
-                "id": file.id,
-                "filename": file.meta.get("name", file.filename) if file.meta else file.filename,
-                "size": file.meta.get("size", 0) if file.meta else 0,
-                "content_type": file.meta.get("content_type", "") if file.meta else "",
-                "created_at": file.created_at,
-                "updated_at": file.updated_at,
-            }
-            for file in all_files
-            if file.meta and file.meta.get("source") == "documents"
-        ]
-        
-        # Sort by created_at descending (newest first)
-        documents.sort(key=lambda x: x["created_at"], reverse=True)
+        # Transform Supabase response to match frontend expectations
+        documents = []
+        for doc in documents_data:
+            meta = doc.get('meta', {})
+            documents.append({
+                "id": doc['id'],
+                "filename": meta.get("name", doc['filename']),
+                "size": meta.get("size", 0),
+                "content_type": meta.get("content_type", ""),
+                "created_at": doc['created_at'],
+                "updated_at": doc['updated_at'],
+            })
         
         return documents
         
     except Exception as e:
         log.exception(e)
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ERROR_MESSAGES.DEFAULT("Error fetching documents"),
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Failed to retrieve documents. Please try again later.",
         )
 
 
@@ -405,76 +403,70 @@ async def list_documents(user=Depends(get_verified_user)):
 @router.delete("/{document_id}")
 async def delete_document(document_id: str, user=Depends(get_verified_user)):
     """
-    Delete a document by ID.
+    Delete a document by ID from Supabase, Gemini, and filesystem.
     Only the owner can delete their documents.
     """
     try:
-        # Get the file
-        file = Files.get_file_by_id(document_id)
-        
-        if not file:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=ERROR_MESSAGES.NOT_FOUND,
-            )
-        
-        # Check if file belongs to user and is a document
-        if file.user_id != user.id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=ERROR_MESSAGES.NOT_FOUND,
-            )
-        
-        # Verify it's a document (has source='documents' tag)
-        if not (file.meta and file.meta.get("source") == "documents"):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=ERROR_MESSAGES.NOT_FOUND,
-            )
-        
-        
         # ====================================================================
-        # TRANSACTIONAL DELETE FLOW: Supabase → Gemini → Local DB
-        # Missing records are lenient (warnings), actual errors are fatal
+        # TRANSACTIONAL DELETE FLOW: Fetch Supabase → Delete Supabase → Delete Gemini → Delete Filesystem
+        # Supabase is source of truth for document metadata
         # ====================================================================
         
-        # Step 1: Delete from Supabase
+        # Step 1: Fetch document from Supabase
+        log.info(f"Fetching document {document_id} from Supabase")
+        
+        if not supabase_service.is_enabled():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Document service temporarily unavailable. Please try again later.",
+            )
+        
+        document = supabase_service.get_document_by_id(document_id)
+        
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found",
+            )
+        
+        # Check ownership
+        if document['user_id'] != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found",
+            )
+        
+        # Extract data for deletion and potential rollback
+        gemini_file_id = document.get('gemini_file_id')  # From column, not meta
+        gemini_store_id = document.get('gemini_store_id')  # From column, not meta
+        file_path = document.get('path')
+        
+        # Save document data for potential rollback
+        document_backup = document.copy()
+        
+        # Step 2: Delete from Supabase
         log.info(f"Step 1/3: Deleting document {document_id} from Supabase")
-        supabase_existed = False
+        try:
+            supabase_service.delete_document_metadata(document_id)
+            log.info(f"✓ Step 1/3: Successfully deleted from Supabase")
+        except Exception as e:
+            log.error(f"✗ Step 1/3 failed: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to delete document metadata: {str(e)}",
+            )
         
-        if supabase_service.is_enabled():
-            try:
-                # Check existence first
-                supabase_existed = supabase_service.check_document_exists(document_id)
-                
-                if supabase_existed:
-                    supabase_service.delete_document_metadata(document_id)
-                    log.info(f"✓ Step 1/3: Successfully deleted from Supabase")
-                else:
-                    log.warning(f"Document {document_id} not found in Supabase, continuing...")
-                    
-            except Exception as e:
-                log.error(f"✗ Step 1/3 failed: {e}")
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=ERROR_MESSAGES.DEFAULT(f"Supabase delete failed: {str(e)}"),
-                )
-        else:
-            log.warning("Supabase not enabled, skipping step 1/3")
-        
-        # Step 2: Delete from Gemini File Storage
+        # Step 3: Delete from Gemini File Storage
         log.info(f"Step 2/3: Deleting document {document_id} from Gemini")
-        metadata = file.meta if hasattr(file, 'meta') and file.meta else {}
-        gemini_file_id = metadata.get('gemini_file_id')
-        gemini_store_id = metadata.get('gemini_store_id')
         
         if gemini_file_id and gemini_store_id:
-            gemini_existed = gemini_service.check_document_exists(
+            # Check if document exists in Gemini
+            gemini_exists = gemini_service.check_document_exists(
                 gemini_file_id=gemini_file_id,
                 gemini_store_id=gemini_store_id
             )
             
-            if gemini_existed:
+            if gemini_exists:
                 try:
                     gemini_deleted = gemini_service.delete_document_from_gemini(
                         gemini_file_id=gemini_file_id,
@@ -482,63 +474,44 @@ async def delete_document(document_id: str, user=Depends(get_verified_user)):
                     )
                     
                     if not gemini_deleted:
-                        raise Exception("Gemini deletion returned False")
+                        raise Exception("Gemini deletion returnedFalse")
                     
                     log.info(f"✓ Step 2/3: Successfully deleted from Gemini")
                     
                 except Exception as e:
                     log.error(f"✗ Step 2/3 failed: {e}")
                     
-                    # ROLLBACK: Restore to Supabase if we deleted from there
-                    if supabase_existed and supabase_service.is_enabled():
-                        try:
-                            restore_data = {
-                                'id': file.id,
-                                'user_id': file.user_id,
-                                'user_email': file.user_email if hasattr(file, 'user_email') else '',
-                                'filename': file.filename,
-                                'path': file.path or '',
-                                'meta': file.meta,
-                                'created_at': file.created_at,
-                                'updated_at': file.updated_at,
-                            }
-                            supabase_service.insert_document_metadata(restore_data)
-                            log.info(f"Rolled back: Restored document {document_id} to Supabase")
-                        except Exception as rollback_error:
-                            log.error(f"CRITICAL: Supabase rollback failed: {rollback_error}")
+                    # ROLLBACK: Restore to Supabase using backup data
+                    try:
+                        supabase_service.insert_document_metadata(document_backup)
+                        log.info(f"Rolled back: Restored document {document_id} to Supabase")
+                    except Exception as rollback_error:
+                        log.error(f"CRITICAL: Supabase rollback failed: {rollback_error}")
                     
                     raise HTTPException(
                         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        detail=ERROR_MESSAGES.DEFAULT(f"Gemini delete failed: {str(e)}"),
+                        detail=f"Failed to delete from storage: {str(e)}",
                     )
             else:
-                log.warning(f"Document {document_id} not found in Gemini, continuing...")
+                log.warning(f"Document {document_id} not found in Gemini (NULL IDs or missing), skipping")
         else:
-            log.info(f"No Gemini metadata for document {document_id}, skipping Gemini deletion")
+            log.info(f"No Gemini IDs for document {document_id}, skipping Gemini deletion")
         
-        # Step 3: Delete from local storage and database
-        log.info(f"Step 3/3: Deleting document {document_id} from local storage")
+        # Step 3: Delete from R2 Storage (LENIENT - no rollback if fails)
+        log.info(f"Step 3/3: Deleting document {document_id} from R2")
         
-        # Delete file from storage
-        try:
-            Storage.delete_file(file.path)
-            log.info(f"Successfully deleted file from local storage: {file.path}")
-        except Exception as e:
-            log.error(f"Error deleting file from storage: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=ERROR_MESSAGES.DEFAULT("Error deleting file from local storage"),
-            )
+        if file_path and r2_storage:
+            try:
+                r2_storage.delete_file(file_path)
+                log.info(f"Successfully deleted file from R2: {file_path}")
+            except Exception as e:
+                log.warning(f"R2 deletion failed, but continuing: {e}")
+                # Don't raise - user still sees success (per user requirement)
+                # File remains in R2 but removed from Supabase/Gemini
+        else:
+            log.warning(f"No file path or R2 storage unavailable for document {document_id}")
         
-        # Delete from database
-        result = Files.delete_file_by_id(document_id)
-        if not result:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=ERROR_MESSAGES.DEFAULT("Error deleting document from database"),
-            )
-        
-        log.info(f"✓ Document {document_id} successfully deleted from all systems")
+        log.info(f"✓ Document {document_id} successfully deleted")
         return {"message": "Document deleted successfully"}
         
     except HTTPException:
@@ -547,5 +520,5 @@ async def delete_document(document_id: str, user=Depends(get_verified_user)):
         log.exception(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ERROR_MESSAGES.DEFAULT("Error deleting document"),
+            detail="Error deleting document",
         )

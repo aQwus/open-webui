@@ -937,6 +937,13 @@ AZURE_STORAGE_ENDPOINT = os.environ.get("AZURE_STORAGE_ENDPOINT", None)
 AZURE_STORAGE_CONTAINER_NAME = os.environ.get("AZURE_STORAGE_CONTAINER_NAME", None)
 AZURE_STORAGE_KEY = os.environ.get("AZURE_STORAGE_KEY", None)
 
+# Cloudflare R2 Storage (S3-compatible)
+R2_ENDPOINT = os.environ.get("R2_ENDPOINT", None)
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", None)
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", None)
+R2_BUCKET = os.environ.get("R2_BUCKET", None)
+R2_REGION = os.environ.get("R2_REGION", "auto")
+
 ####################################
 # File Upload DIR
 ####################################

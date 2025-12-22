@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from open_webui.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 
 log = logging.getLogger(__name__)
@@ -74,6 +74,7 @@ class SupabaseService:
     def insert_document_metadata(self, doc_data: Dict[str, Any]) -> bool:
         """
         Insert document metadata into Supabase with upsert strategy.
+        Extracts gemini_file_id and gemini_store_id to separate columns.
         
         Args:
             doc_data: Dictionary containing:
@@ -82,21 +83,30 @@ class SupabaseService:
                 - user_email: string
                 - filename: string
                 - path: string
-                - meta: JSON object
+                - meta: JSON object (may contain gemini_file_id, gemini_store_id)
                 - created_at: nanosecond timestamp
                 - updated_at: nanosecond timestamp
                 
         Returns:
-            True if successful, False otherwise
+            True if successful, raises Exception otherwise
         """
         if not self.is_enabled():
             log.warning("Supabase not enabled, skipping metadata insert")
-            return False
+            raise Exception("Supabase service not enabled")
         
         try:
             # Convert nanosecond timestamps to ISO format
             created_at_iso = self._convert_timestamp(doc_data.get('created_at'))
             updated_at_iso = self._convert_timestamp(doc_data.get('updated_at'))
+            
+            # Extract Gemini IDs from meta (may be None)
+            meta = doc_data.get('meta', {})
+            gemini_file_id = meta.get('gemini_file_id')
+            gemini_store_id = meta.get('gemini_store_id')
+            
+            # Remove Gemini IDs from meta (now stored as separate columns)
+            clean_meta = {k: v for k, v in meta.items() 
+                         if k not in ['gemini_file_id', 'gemini_store_id']}
             
             # Prepare data for Supabase
             supabase_data = {
@@ -105,7 +115,9 @@ class SupabaseService:
                 'user_email': doc_data.get('user_email', ''),
                 'filename': doc_data['filename'],
                 'path': doc_data.get('path', ''),
-                'meta': doc_data.get('meta', {}),
+                'gemini_file_id': gemini_file_id,  # Separate column (nullable)
+                'gemini_store_id': gemini_store_id,  # Separate column (nullable)
+                'meta': clean_meta,  # Cleaned meta without Gemini IDs
                 'created_at': created_at_iso,
                 'updated_at': updated_at_iso
             }
@@ -119,6 +131,65 @@ class SupabaseService:
         except Exception as e:
             log.error(f"Failed to insert document metadata to Supabase: {e}")
             raise Exception(f"Supabase sync failed: {str(e)}")
+    
+    def list_user_documents(self, user_id: str) -> List[Dict]:
+        """
+        List all documents for a user from Supabase.
+        
+        Args:
+            user_id: User ID to filter documents
+            
+        Returns:
+            List of document dictionaries, raises Exception on error
+        """
+        if not self.is_enabled():
+            log.warning("Supabase not enabled")
+            raise Exception("Document service temporarily unavailable")
+        
+        try:
+            response = (self.client.table('doc_metadata')
+                .select('*')
+                .eq('user_id', user_id)
+                .order('created_at', desc=True)
+                .execute())
+            
+            log.info(f"Retrieved {len(response.data)} documents for user {user_id}")
+            return response.data
+            
+        except Exception as e:
+            log.error(f"Failed to list documents from Supabase: {e}")
+            raise Exception(f"Failed to retrieve documents: {str(e)}")
+    
+    def get_document_by_id(self, document_id: str) -> Optional[Dict]:
+        """
+        Get a single document by ID from Supabase.
+        
+        Args:
+            document_id: UUID of the document
+            
+        Returns:
+            Document dictionary or None if not found, raises Exception on error
+        """
+        if not self.is_enabled():
+            log.warning("Supabase not enabled")
+            raise Exception("Document service temporarily unavailable")
+        
+        try:
+            response = (self.client.table('doc_metadata')
+                .select('*')
+                .eq('id', document_id)
+                .execute())
+            
+            if len(response.data) > 0:
+                log.debug(f"Found document {document_id} in Supabase")
+                return response.data[0]
+            else:
+                log.debug(f"Document {document_id} not found in Supabase")
+                return None
+                
+        except Exception as e:
+            log.error(f"Failed to get document from Supabase: {e}")
+            raise Exception(f"Failed to retrieve document: {str(e)}")
     
     def delete_document_metadata(self, document_id: str) -> bool:
         """
