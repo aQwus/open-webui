@@ -55,6 +55,7 @@
 	import ChannelModal from './Sidebar/ChannelModal.svelte';
 	import ChannelItem from './Sidebar/ChannelItem.svelte';
 	import DocumentsModal from './Sidebar/DocumentsModal.svelte';
+	import ConnectionsModal from './Sidebar/ConnectionsModal.svelte';
 	import PencilSquare from '../icons/PencilSquare.svelte';
 	import Search from '../icons/Search.svelte';
 	import SearchModal from './SearchModal.svelte';
@@ -77,6 +78,7 @@
 	let selectedChatId = null;
 	let showCreateChannel = false;
 	let showDocumentsModal = false;
+	let showConnectionsModal = false;
 
 	// Pagination variables
 	let chatListLoading = false;
@@ -537,6 +539,7 @@
 />
 
 <DocumentsModal bind:show={showDocumentsModal} />
+<ConnectionsModal bind:show={showConnectionsModal} />
 
 <!-- svelte-ignore a11y-no-static-element-interactions -->
 
@@ -983,6 +986,21 @@
 						{/each}
 					</Folder>
 				{/if}
+
+				<!-- Connections Section -->
+				<Folder
+					id="sidebar-connections"
+					className="px-2 mt-0.5"
+					name={$i18n.t('Connections')}
+					chevron={false}
+					dragAndDrop={false}
+					onAdd={() => {
+						showConnectionsModal = true;
+					}}
+					onAddLabel={$i18n.t('Manage Connections')}
+				>
+					<!-- Empty for now, content will be added later -->
+				</Folder>
 
 				<!-- Documents Section -->
 				<Folder

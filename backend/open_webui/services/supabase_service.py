@@ -231,6 +231,185 @@ class SupabaseService:
         seconds = ns_timestamp / 1_000_000_000
         dt = datetime.utcfromtimestamp(seconds)
         return dt.isoformat()
+    
+
+    
+    def get_user_sync_status(self, user_id: str, source: str) -> tuple[Optional[str], Optional[str]]:
+        """
+        Get sync status and last sync timestamp for a connection source.
+        
+        Args:
+            user_id: User ID from auth table
+            source: Connection source name (e.g., 'attio', 'notion')
+            
+        Returns:
+            Tuple of (sync_status, last_sync) or (None, None) if not found
+        """
+        if not self.is_enabled():
+            return (None, None)
+        
+        try:
+            status_column = f"{source}_sync_status"
+            last_sync_column = f"{source}_last_sync"
+            
+            response = (self.client.table('users')
+                .select(f"{status_column}, {last_sync_column}")
+                .eq('user_id', user_id)
+                .limit(1)
+                .execute())
+            
+            if response.data and len(response.data) > 0:
+                data = response.data[0]
+                sync_status = data.get(status_column)
+                last_sync = data.get(last_sync_column)
+                log.debug(f"Sync status for {source}: {sync_status}, last sync: {last_sync}")
+                return (sync_status, last_sync)
+            else:
+                log.debug(f"No sync status found for user {user_id}, source {source}")
+                return (None, None)
+                
+        except Exception as e:
+            log.error(f"Error getting sync status for {source}: {e}")
+            return (None, None)
+    
+    def update_user_sync_status(self, user_id: str, source: str, status: str, last_sync: Optional[datetime] = None) -> bool:
+        """
+        Update sync status and optionally last sync timestamp for a connection.
+        
+        Args:
+            user_id: User ID from auth table
+            source: Connection source name (e.g., 'attio', 'notion')
+            status: Sync status - 'in_progress', 'success', or 'failed'
+            last_sync: Optional timestamp to set (defaults to now())
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.is_enabled():
+            return False
+        
+        try:
+            status_column = f"{source}_sync_status"
+            last_sync_column = f"{source}_last_sync"
+            
+            update_data = {status_column: status}
+            
+            # Only update last_sync if provided or status is success
+            if last_sync:
+                update_data[last_sync_column] = last_sync.isoformat()
+            elif status == 'success':
+                update_data[last_sync_column] = datetime.utcnow().isoformat()
+            
+            response = (self.client.table('users')
+                .update(update_data)
+                .eq('user_id', user_id)
+                .execute())
+            
+            log.info(f"Updated sync status for {source}: {status}")
+            return True
+            
+        except Exception as e:
+            log.error(f"Failed to update sync status for {source}: {e}")
+            return False
+    
+    def get_connection_context_metadata(self, user_id: str, source: str) -> Optional[Dict]:
+        """
+        Get connection context metadata (for synced data like Attio notes).
+        
+        Args:
+            user_id: User ID
+            source: Connection source ('attio', 'notion', etc.)
+            
+        Returns:
+            Document metadata dict or None if not found
+        """
+        if not self.is_enabled():
+            return None
+        
+        try:
+            response = (self.client.table('doc_metadata')
+                .select('*')
+                .eq('user_id', user_id)
+                .eq('source', source)
+                .limit(1)
+                .execute())
+            
+            if response.data and len(response.data) > 0:
+                log.debug(f"Found connection context for {source}")
+                return response.data[0]
+            else:
+                log.debug(f"No connection context found for {source}")
+                return None
+                
+        except Exception as e:
+            log.error(f"Error getting connection context for {source}: {e}")
+            return None
+    
+    def upsert_connection_context_metadata(self, user_id: str, user_email: str, source: str, 
+                                           gemini_file_id: str, gemini_store_id: str, 
+                                           connection_id: str, count: int) -> bool:
+        """
+        Upsert connection context metadata (synced notes, pages, etc).
+        
+        Args:
+            user_id: User ID
+            user_email: User email
+            source: Connection source ('attio', 'notion')
+            gemini_file_id: Gemini file ID containing all context
+            gemini_store_id: Gemini store ID
+            connection_id: Composio connection ID
+            count: Number of items synced (notes, pages, etc.)
+            
+        Returns:
+            True if successful, raises Exception otherwise
+        """
+        if not self.is_enabled():
+            raise Exception("Supabase service not enabled")
+        
+        try:
+            # Check if context already exists
+            existing = self.get_connection_context_metadata(user_id, source)
+            
+            filename = f"{source}_context"
+            
+            supabase_data = {
+                'user_id': user_id,
+                'user_email': user_email,
+                'filename': filename,
+                'path': '',  # Empty for connection context
+                'source': source,
+                'gemini_file_id': gemini_file_id,
+                'gemini_store_id': gemini_store_id,
+                'meta': {
+                    'connection_id': connection_id,
+                    'count': count
+                },
+                'updated_at': datetime.utcnow().isoformat()
+            }
+            
+            if existing:
+                # Update existing record
+                supabase_data['id'] = existing['id']
+                response = (self.client.table('doc_metadata')
+                    .update(supabase_data)
+                    .eq('id', existing['id'])
+                    .execute())
+                log.info(f"Updated connection context for {source}")
+            else:
+                # Insert new record
+                import uuid
+                supabase_data['id'] = str(uuid.uuid4())
+                supabase_data['created_at'] = datetime.utcnow().isoformat()
+                response = (self.client.table('doc_metadata')
+                    .insert(supabase_data)
+                    .execute())
+                log.info(f"Created connection context for {source}")
+            
+            return True
+            
+        except Exception as e:
+            log.error(f"Failed to upsert connection context for {source}: {e}")
+            raise Exception(f"Failed to save connection context: {str(e)}")
 
 
 # Initialize global Supabase service instance

@@ -44,6 +44,7 @@ anthropic
 google-genai==1.55.0
 google-generativeai==0.8.5
 supabase>=2.0.0
+# composio-core>=0.10.0  # Installed separately in Dockerfile to avoid conflicts
 
 langchain==0.3.27
 langchain-community==0.3.29

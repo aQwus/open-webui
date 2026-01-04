@@ -1056,6 +1056,14 @@ GEMINI_API_BASE_URL = os.environ.get("GEMINI_API_BASE_URL", "")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
+# Composio configuration for integration connections
+COMPOSIO_API_KEY = os.environ.get("COMPOSIO_API_KEY", "")
+ATTIO_AUTH_CONFIG_ID = os.environ.get("ATTIO_AUTH_CONFIG_ID", "")
+ATTIO_RECORDS_LIST_LIMIT = int(os.environ.get("ATTIO_RECORDS_LIST_LIMIT", "100"))
+ATTIO_RECORDS_NOTES_LIMIT = int(os.environ.get("ATTIO_RECORDS_NOTES_LIMIT", "50"))
+NOTION_AUTH_CONFIG_ID = os.environ.get("NOTION_AUTH_CONFIG_ID", "")
+NOTION_LIST_LIMIT = int(os.environ.get("NOTION_LIST_LIMIT", "100"))
+
 
 if OPENAI_API_BASE_URL == "":
     OPENAI_API_BASE_URL = "https://api.openai.com/v1"

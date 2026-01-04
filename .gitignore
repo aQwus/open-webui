@@ -312,7 +312,7 @@ cypress/screenshots
 .vscode/settings.json
 
 #ide conversation context
-summary.md
+#summary.md
 
 # Gemini Antigravity artifacts
 .gemini/

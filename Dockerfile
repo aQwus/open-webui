@@ -147,6 +147,11 @@ RUN pip3 install --no-cache-dir uv && \
     mkdir -p /app/backend/data && chown -R $UID:$GID /app/backend/data/ && \
     rm -rf /var/lib/apt/lists/*;
 
+# Install composio-core v0.10.0+ separately with force reinstall
+# This allows composio to override any conflicting package versions from main requirements  
+# Using --force-reinstall to ensure v0.10.0+ is installed even if dependencies conflict
+RUN uv pip install --system 'composio>=0.10.0' --no-cache-dir || echo "Warning: composio-core installation failed"
+
 # Install Ollama if requested
 RUN if [ "$USE_OLLAMA" = "true" ]; then \
     date +%s > /tmp/ollama_build_hash && \

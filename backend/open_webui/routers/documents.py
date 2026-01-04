@@ -269,11 +269,11 @@ async def upload_document(
                     'user_email': user.email,
                     'filename': safe_filename,  # Use sanitized filename
                     'path': file_path,
+                    'source': 'manual',  # Manual document upload
                     'meta': {
                         "name": safe_filename,  # Use sanitized filename
                         "content_type": file.content_type or "application/octet-stream",
                         "size": file_size,
-                        "source": "documents",
                         "gemini_file_id": gemini_file_id,
                         "gemini_store_id": gemini_store_id,
                     },
