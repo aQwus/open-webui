@@ -13,6 +13,7 @@ export interface ConnectionStatus {
 export interface ConnectionStatusResponse {
     attio: ConnectionStatus;
     notion: ConnectionStatus;
+    gdocs: ConnectionStatus;
 }
 
 export interface InitiateConnectionResponse {
@@ -204,6 +205,94 @@ export const getNotionSyncStatus = async (token: string) => {
  */
 export const triggerNotionSync = async (token: string) => {
     const res = await fetch(`${WEBUI_API_BASE_URL}/connections/notion/trigger-sync`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+        }
+    }).catch((err) => {
+        console.error(err);
+        return null;
+    });
+
+    if (!res || !res.ok) {
+        throw await res?.json();
+    }
+
+    return res.json();
+};
+
+/**
+ * Initiate Google Docs OAuth connection
+ */
+export const initiateGDocsConnection = async (token: string) => {
+    const res = await fetch(`${WEBUI_API_BASE_URL}/connections/gdocs/initiate`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+        }
+    }).catch((err) => {
+        console.error(err);
+        return null;
+    });
+
+    if (!res || !res.ok) {
+        throw await res?.json();
+    }
+
+    return res.json();
+};
+
+/**
+ * Check if Google Docs connection is complete (for polling)
+ */
+export const checkGDocsConnection = async (token: string): Promise<ConnectionStatus> => {
+    const res = await fetch(`${WEBUI_API_BASE_URL}/connections/gdocs/check`, {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+        }
+    }).catch((err) => {
+        console.error(err);
+        return null;
+    });
+
+    if (!res || !res.ok) {
+        throw await res?.json();
+    }
+
+    return res.json();
+};
+
+/**
+ * Get Google Docs sync status for current user
+ */
+export const getGDocsSyncStatus = async (token: string) => {
+    const res = await fetch(`${WEBUI_API_BASE_URL}/connections/gdocs/sync-status`, {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+        }
+    }).catch((err) => {
+        console.error(err);
+        return null;
+    });
+
+    if (!res || !res.ok) {
+        throw await res?.json();
+    }
+
+    return res.json();
+};
+
+/**
+ * Manually trigger Google Docs sync
+ */
+export const triggerGDocsSync = async (token: string) => {
+    const res = await fetch(`${WEBUI_API_BASE_URL}/connections/gdocs/trigger-sync`, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',

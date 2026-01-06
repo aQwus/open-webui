@@ -1762,3 +1762,605 @@ R2_REGION=auto
 GEMINI_API_KEY=...
 ```
 
+
+
+---
+
+## Phase 9: Composio Integration - Attio and Notion Sync
+
+### Goal
+Integrate Composio SDK for OAuth-based connections to Attio and Notion, fetching data from these platforms and syncing to Gemini File Storage for RAG context.
+
+### Architecture Overview
+
+#### User ID Standardization
+**Decision:** All Composio connections use OpenWebUI `user.id` directly, no separate `integration_user_id` columns.
+
+**Rationale:**
+- Simpler database schema
+- One user identifier across all systems
+- Eliminates sync complexity
+- Easier to debug and maintain
+
+#### Data Flow
+```
+User → OAuth Flow → Composio Connection (user.id)
+  ↓                           ↓
+Composio API            Connection Metadata
+  ↓                           ↓
+Fetch Data (Attio/Notion)   Supabase (sync_status)
+  ↓                           ↓
+Create Context File      Update Status
+  ↓                           ↓
+Upload to Gemini        Save Metadata
+  ↓                           ↓
+RAG Enabled             Complete
+```
+
+### Composio Service
+**File:** `backend/open_webui/services/composio_service.py`
+
+**Purpose:** Wrapper around Composio SDK for OAuth and data operations
+
+**Key Methods:**
+```python
+class ComposioService:
+    def initiate_connection(user_id, auth_config_id) -> dict:
+        # Returns: {redirect_url, connection_id, status}
+    
+    def check_connection_status(user_id, auth_config_id) -> dict:
+        # Returns: {connected, connection_id, status}
+```
+
+**Auth Configs:**
+- `ATTIO_AUTH_CONFIG_ID` - Attio OAuth configuration
+- `NOTION_AUTH_CONFIG_ID` - Notion OAuth configuration
+
+### Integration Endpoints
+**File:** `backend/open_webui/routers/connections.py`
+
+#### Connection Status
+```python
+GET /api/connections/status
+# Returns status for all integrations (Attio, Notion)
+# Uses user.id directly - no database lookup
+```
+
+#### Attio Endpoints
+```python
+POST /api/connections/attio/initiate
+# Initiates OAuth, returns InitiateConnectionResponse
+# {redirect_url, connection_id, status}
+
+GET /api/connections/attio/check  
+# Polls connection status during OAuth
+# Returns CheckConnectionResponse
+
+POST /api/connections/attio/trigger-sync
+# Manually triggers sync after OAuth
+# Adds background task for attio_sync_service
+
+GET /api/connections/attio/sync-status
+# Returns {status, last_sync, notes_count}
+```
+
+#### Notion Endpoints
+```python  
+POST /api/connections/notion/initiate
+GET /api/connections/notion/check
+POST /api/connections/notion/trigger-sync  
+GET /api/connections/notion/sync-status
+# Same pattern as Attio
+```
+
+### Attio Sync Service
+**File:** `backend/open_webui/services/attio_sync_service.py`
+
+**Composio Tool Calls:**
+```python
+# 1. List Records
+ATTIO_LIST_RECORDS(
+    object_type="people" | "companies" | "deals",
+    limit=50,
+    offset=0
+)
+# Returns: {data: {data: [{id, values}]}}
+
+# 2. List Notes per Record  
+ATTIO_LIST_NOTES(
+    parent_object="people",
+    parent_record_id="uuid",
+    limit=200
+)
+# Returns: {data: {data: [{title, content_plaintext}]}}
+```
+
+**Data Structure:**
+```python
+# Fetched Format
+{
+    "object_type": "people",
+    "record_id": "...",
+    "record_name": "John Doe",
+    "notes": [
+        {"title": "...", "content_plaintext": "..."}
+    ]
+}
+
+# Context File Format (.txt)
+=== [People] John Doe ===
+
+Note: Meeting Notes
+Discussed project timeline...
+
+---
+
+=== [Companies] Acme Corp ===
+...
+```
+
+**Retry Logic:**
+- **Trigger:** Error code 1803 or "No connected account"
+- **Delays:** 10s, 20s, 30s (3 retries)
+- **Total Grace Period:** 63 seconds for connection propagation
+
+### Notion Sync Service  
+**File:** `backend/open_webui/services/notion_sync_service.py`
+
+**Composio Tool Calls:**
+```python
+# 1. Fetch Pages
+NOTION_FETCH_DATA(
+    get_databases=False,
+    get_pages=True,
+    page_size=100
+)
+# Returns: {
+#   data: {
+#     values: [{id, title}],
+#     results: [{id, archived, in_trash}]
+#   }
+# }
+
+# 2. Fetch Page Content
+NOTION_FETCH_ALL_BLOCK_CONTENTS(
+    block_id="page_id",
+    recursive=True
+)
+# Returns: {data: {results: [blocks]}}
+```
+
+**Data Structure:**
+```python
+# Fetched Format
+{
+    "page_id": "...",
+    "title": "Project Roadmap",
+    "content": "# Page Title: Project Roadmap\n\n..."
+}
+
+# Context File Format (.txt)
+# Page Title: Project Roadmap
+
+## Q1 Goals
+- Launch MVP
+- Acquire 100 users
+
+---
+
+# Page Title: Team Notes
+...
+```
+
+**Rate Limit Handling:**
+
+**Problem:** Notion API has 3 requests/second limit
+
+**Solution 1 - Proactive:**
+- 0.5 second delays between API calls
+- Effective rate: 2 req/sec (safe buffer)
+
+**Solution 2 - Reactive (Exponential Backoff):**
+```python
+@handle_rate_limit  # Decorator
+def _fetch_page_content(...):
+    # Auto-retries on 429 errors
+    # Delays: 1s, 2s, 4s, 8s, 16s (5 retries)
+```
+
+**Error Detection:**
+- HTTP 429
+- "rate limit" in error message
+- "too many requests" in error message
+
+### Storage and Metadata
+
+#### Supabase Tables
+
+**1. `users` table columns:**
+```sql
+-- Sync Status Columns
+attio_sync_status TEXT         -- 'in_progress' | 'success' | 'failed'
+attio_last_sync TIMESTAMP
+notion_sync_status TEXT  
+notion_last_sync TIMESTAMP
+
+-- Note: NO integration_user_id columns!
+-- All connections use user_id directly
+```
+
+**2. `doc_metadata` table:**
+```sql
+id UUID PRIMARY KEY
+user_id UUID
+user_email TEXT
+filename TEXT
+source TEXT                    -- 'attio' | 'notion' | 'manual'
+gemini_file_id TEXT           -- Gemini file ID
+gemini_store_id TEXT          -- Gemini store ID  
+connection_id TEXT            -- Composio connection ID
+meta JSONB                     -- {count: number_of_notes/pages}
+created_at TIMESTAMP
+updated_at TIMESTAMP
+```
+
+#### Gemini File Storage
+
+**Store Creation:**
+```python
+gemini_service.get_or_create_file_search_store(user_id)
+# Creates: "{user_id}_file_search_store"
+# Shared across manual docs, Attio, and Notion
+# Auto-finds existing or creates new
+```
+
+**File Upload:**
+```python
+gemini_service.upload_file_to_gemini(
+    file_path="/tmp/attio_context.txt",
+    filename="attio_context.txt",
+    user_id=user_id,
+    document_id=uuid.uuid4()
+)
+# Returns: (gemini_file_id, gemini_store_id)
+```
+
+### Major Bugs Found and Solutions
+
+#### Bug 1: Notion OAuth 404 Error
+**Problem:** OAuth popup showed 404 instead of Composio authentication page
+
+**Root Cause:**
+```python
+# Bad - extracting redirect_url as string
+redirect_url = composio_service.initiate_connection(user_id, config_id)
+return {"redirect_url": redirect_url}  # Wrong type
+```
+
+**Solution:**
+```python
+# Good - return full response object
+connection_data = composio_service.initiate_connection(user_id, config_id)
+return InitiateConnectionResponse(**connection_data)
+# {redirect_url, connection_id, status}
+```
+
+#### Bug 2: Retry Logic Not Working
+**Problem:** Notion sync failed immediately with error 1803, no retries attempted
+
+**Root Cause:**
+```python
+# Original exception loses error code
+if "1803" in str(e):
+    raise Exception(f"Connection expired")  # Lost 1803!
+
+# Retry logic can't detect it
+if "1803" in error_str:  # Never matches
+    retry()
+```
+
+**Solution:**
+```python
+# Preserve error code
+raise Exception(f"[1803] Connection expired")  # Keeps code!
+```
+
+#### Bug 3: Gemini Store Method Not Found
+**Problem:** `'GeminiService' object has no attribute 'list_user_stores'`
+
+**Root Cause:**
+```python
+# Attio used Supabase lookup (worked)
+existing = supabase.get_connection_context_metadata(user_id, 'manual')
+
+# Notion tried non-existent method
+stores = gemini.list_user_stores(user_id)  # Doesn't exist!
+```
+
+**Solution:**
+```python
+# Both now use Gemini's built-in method
+gemini_store_id = self.gemini.get_or_create_file_search_store(user_id)
+# Handles find + create automatically
+```
+
+#### Bug 4: notion_user_id Column Doesn't Exist
+**Problem:** `column users.notion_user_id does not exist`
+
+**Root Cause:**
+- Code tried to get/store `notion_user_id` from database
+- Column was never created (unlike `attio_user_id` which existed)
+
+**Solution:** Eliminated separate user ID columns entirely
+```python
+# Old - database lookup
+notion_user_id = supabase.get_user_integration_id(user.id, 'notion')
+
+# New - use user.id directly
+notion_user_id = user.id
+```
+
+### Exception Handling Patterns
+
+#### Connection Propagation Errors
+**Error Code:** 1803 - "No connected account found"
+
+**Cause:** OAuth completes but connection not yet propagated in Composio
+
+**Handling:**
+```python
+max_retries = 3
+retry_delays = [10, 20, 30]
+
+for attempt in range(max_retries):
+    try:
+        data = fetch_from_api(user_id)
+        break
+    except Exception as e:
+        if "1803" in str(e) and attempt < max_retries - 1:
+            time.sleep(retry_delays[attempt])
+            continue
+        raise
+```
+
+#### Rate Limit Errors
+**Error Code:** 429 - "Too Many Requests"
+
+**Handling:**
+```python
+@handle_rate_limit
+def api_call():
+    # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+    # Detects: 429, "rate limit", "too many requests"
+    pass
+```
+
+#### General API Errors
+**Best Practice:**
+- Log full error with context
+- Update sync_status to 'failed'
+- Cleanup partial uploads
+- Return user-friendly message
+
+```python
+try:
+    sync_data()
+except Exception as e:
+    log.error(f"Sync failed: {e}", exc_info=True)
+    supabase.update_user_sync_status(user_id, source, 'failed')
+    if gemini_file_id:
+        gemini.delete_file(gemini_file_id)
+    return {"status": "failed", "error": str(e)}
+```
+
+### Frontend Integration
+**File:** `src/lib/components/layout/Sidebar/ConnectionsModal.svelte`
+
+**OAuth Flow:**
+1. User clicks "Connect"
+2. Call `/initiate` endpoint → get redirect_url
+3. Open popup with redirect_url
+4. Poll `/check` endpoint every 2s (max 30 times = 60s)
+5. When connected, close popup
+6. Wait 3 seconds (permissions propagation)
+7. Call `/trigger-sync` endpoint
+8. Poll `/sync-status` endpoint for progress
+
+**Key Pattern:**
+```javascript
+// Delay before triggering sync
+setTimeout(async () => {
+    await triggerNotionSync($user.token);
+    pollSyncStatus();
+}, 3000);  // 3 second delay
+```
+
+### Environment Variables
+
+```bash
+# Composio
+COMPOSIO_API_KEY=...
+
+# Attio
+ATTIO_AUTH_CONFIG_ID=...
+ATTIO_RECORDS_LIST_LIMIT=50
+ATTIO_RECORDS_NOTES_LIMIT=200
+
+# Notion  
+NOTION_AUTH_CONFIG_ID=...
+NOTION_LIST_LIMIT=100
+
+# Also requires GEMINI_API_KEY and SUPABASE_* vars
+```
+
+### Common Mistakes to Avoid
+
+1. ❌ **Don't use separate integration_user_id** - Use user.id directly
+2. ❌ **Don't lose error codes in exceptions** - Preserve [1803] for retry logic
+3. ❌ **Don't call non-existent Gemini methods** - Use get_or_create_file_search_store()
+4. ❌ **Don't trigger sync immediately** - Wait 3-10s for OAuth propagation
+5. ❌ **Don't ignore rate limits** - Add proactive delays + retry logic
+6. ❌ **Don't forget retry on 1803** - Connection needs time to propagate
+7. ❌ **Don't use UUID for integration IDs** - OpenWebUI user.id is the UUID
+8. ❌ **Don't store duplicate data** - One Gemini store per user (shared across sources)
+
+### Testing Checklist
+
+**OAuth Flow:**
+- [ ] Popup opens with valid URL (not 404)
+- [ ] User can authenticate successfully
+- [ ] Popup closes after auth
+- [ ] Connection status updates correctly
+
+**Sync Process:**
+- [ ] Sync starts after connection
+- [ ] Status shows "in_progress"
+- [ ] Retries on 1803 errors
+- [ ] Handles rate limits gracefully
+- [ ] Updates to "success" when complete
+- [ ] Shows correct count in UI
+
+**Error Handling:**
+- [ ] Graceful failure messages
+- [ ] Cleanup on errors
+- [ ] Status updates to "failed"
+- [ ] Logs include full context
+
+### Performance Considerations
+
+**Rate Limits:**
+- Notion: 3 req/sec → Use 0.5s delays (2 req/sec effective)
+- Attio: Higher limit → No delays needed
+
+**Large Workspaces:**
+- Notion 500+ pages: ~250 seconds (0.5s delay × 500)
+- Background processing prevents UI blocking
+- Consider pagination for very large sets
+
+**Gemini Upload:**
+- Combine all content into single file per source
+- More efficient than individual uploads
+- Easier to manage and delete
+
+### Next Steps
+
+**Completed:**
+✅ User ID standardization
+✅ Notion OAuth integration
+✅ Retry logic for connection propagation
+✅ Rate limit handling
+✅ Gemini store management
+
+**Future Enhancements:**
+- [ ] Add more integrations (Slack, Google Drive, etc.)
+- [ ] Implement incremental sync (delta updates)
+- [ ] Add sync scheduling (daily/weekly)
+- [ ] Support workspace selection for Notion
+- [ ] Add connection health monitoring
+- [ ] Implement circuit breaker pattern
+
+### Key Learnings
+
+1. **Composio Connection IDs:** Use user.id directly, not separate UUIDs
+2. **OAuth Timing:** Always wait 3-10s before first API call after OAuth
+3. **Error Codes Matter:** Preserve error codes like [1803] through exception chain
+4. **Rate Limiting:** Proactive (delays) + Reactive (retry) = robust
+5. **Gemini Stores:** One store per user, shared across all sources
+6. **Testing:** Always test OAuth in incognito to avoid cache issues
+7. **Exponential Backoff:** Better than fixed delays for rate limits
+8. **Metadata Storage:** Supabase for status/timestamps, Gemini for content
+
+---
+
+
+## Phase 9: Google Docs Integration
+
+### Goal
+Sync Google Docs from a user's account to Gemini File Storage for RAG, managing metadata in Supabase.
+
+### Architecture
+1.  **Backend Service:** \GDocsSyncService\ (\services/gdocs_sync_service.py\)
+    *   Orchestrates the sync process.
+    *   Uses **Composio** SDK to search and fetch documents from Google Docs.
+    *   Uses **GeminiService** to upload content to Google's GenAI File Storage.
+    *   Uses **SupabaseService** to store metadata and sync status.
+2.  **Frontend Interface:** \ConnectionsModal.svelte\
+    *   Adds Google Docs to the existing connection list (Attio, Notion).
+    *   Handles OAuth initiation via Composio.
+    *   Displays sync status and document counts.
+
+### Implementation Details
+*   **Composio Integration:**
+    *   Tools used: \GOOGLEDOCS_SEARCH_DOCUMENTS\, \GOOGLEDOCS_GET_DOCUMENT_BY_ID\.
+    *   Authentication: Uses \GDOCS_AUTH_CONFIG_ID\.
+*   **Sync Logic:**
+    *   **Pagination:** Fetches all docs using \
+ext_page_token\.
+    *   **Deduplication:** Tracks seen IDs to avoid duplicates.
+    *   **Rate Limiting:** Implements retry logic with exponential backoff for 429 errors.
+    *   **Connection Propagation:** Retries on 1803 (\No connected account\) errors to allow time for OAuth propagation.
+*   **Metadata Storage:**
+    *   Stores \gemini_file_id\, \gemini_store_id\, \source='gdocs'\ in Supabase \doc_metadata\ table.
+
+### Issues Encountered & Fixes
+
+#### Issue 9.1: Svelte 5 Runes Mode Error
+**Problem:** Build failed with \Cannot use 'export let' in runes mode\.
+**Cause:** \ConnectionsModal.svelte\ was using old Svelte 4 syntax while the project is configured for Svelte 5.
+**Solution:**
+*   Converted \export let show = false;\ to \$props().show = false\.
+*   Ensured compatibility with the new Runes system.
+
+#### Issue 9.2: Backend Authentication Failure
+**Problem:** Backend rejected requests with \ValueError: not enough values to unpack\.
+**Cause:** Frontend API calls in \connections.ts\ were sending an incomplete Authorization header: \Bearer \ (missing the token).
+**Solution:**
+*   Updated \connections.ts\ to correctly interpolate the token: \\Authorization: \Bearer \ \\.
+
+#### Issue 9.3: Silent Frontend Failure (Missing Base URL)
+**Problem:** \Failed to initiate connection\ error in UI, with NO logs in the backend.
+**Cause:** Frontend fetch calls were missing the \${WEBUI_API_BASE_URL}\ prefix.
+**Effect:** Requests were hitting the frontend server (browser URL) instead of the backend API, resulting in 404s that looked like silent failures.
+**Solution:**
+*   Prepended \${WEBUI_API_BASE_URL}\ to all Google Docs fetch URLs in \connections.ts\.
+
+#### Issue 9.4: Missing Configuration Environment Variable
+**Problem:** Backend raised \HTTPException\ because \GDOCS_AUTH_CONFIG_ID\ was missing.
+**Solution:**
+*   Added \GDOCS_AUTH_CONFIG_ID\ to \.env\ and \config.py\.
+*   Improved error logging in \outers/connections.py\ to explicitly log when this variable is missing.
+
+#### Issue 9.5: Missing Metadata in Supabase
+**Problem:** Rows created in \doc_metadata\ had empty \gemini_file_id\, \gemini_store_id\, and \source\ columns.
+**Cause:**
+1.  \supabase_service.py\ was looking for IDs inside a nested \meta\ dictionary, but \gdocs_sync_service.py\ was passing them at the top level.
+2.  \source\ field was missing from the Supabase insert payload.
+**Solution:**
+*   Updated \supabase_service.py\ to check both top-level and nested \meta\ for compatibility.
+*   Added \source\ field to the insert payload.
+
+#### Issue 9.6: \Invalid Request Data\ for Google Drive Files
+**Problem:** Sync failed for some files with \Invalid request data\.
+**Cause:** The \GOOGLEDOCS_SEARCH_DOCUMENTS\ tool returns both native Google Docs and other Google Drive files. Drive file IDs start with \1-\ and cannot be fetched as text documents.
+**Solution:**
+*   Added a check in \gdocs_sync_service.py\ to skip IDs starting with \1-\, creating a \ailsafe\ to continue syncing valid docs.
+
+### Follow-up Questions & Answers
+
+#### Q: How do we ensure manual uploads are labeled correctly?
+**Request:** Ensure \Documents\ modal uploads use \source='manual'\.
+**Solution:**
+1.  Updated \supabase_service.py\ to default \source\ to \'manual'\ if not provided.
+2.  Verified that \documents.py\ (manual upload route) explicitly sets \source='manual'\.
+3.  Verified that sync services (\gdocs\, \ttio\, \
+otion\) explicitly set their respective sources.
+
+### Agent Tool Usage & Response Structure
+*   **Tools:** The agent uses tools like \iew_file\, \eplace_file_content\, \un_command\ (for Docker), and \grep_search\.
+*   **Pattern:**
+    1.  **Validation:** Always verify file content before editing.
+    2.  **Atomic Edits:** Make specific, targeted changes rather than rewriting huge files to avoid context loss.
+    3.  **Verification:** Use \grep\ or manual review to confirm changes were applied correctly.
+    4.  **Feedback Loop:** Use \
+otify_user\ to communicate requires actions (like checking \.env\ vars) that the agent cannot do itself.
+

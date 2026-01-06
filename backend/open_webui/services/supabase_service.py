@@ -99,10 +99,10 @@ class SupabaseService:
             created_at_iso = self._convert_timestamp(doc_data.get('created_at'))
             updated_at_iso = self._convert_timestamp(doc_data.get('updated_at'))
             
-            # Extract Gemini IDs from meta (may be None)
+            # Extract Gemini IDs (check top-level first, then meta for backward compatibility)
             meta = doc_data.get('meta', {})
-            gemini_file_id = meta.get('gemini_file_id')
-            gemini_store_id = meta.get('gemini_store_id')
+            gemini_file_id = doc_data.get('gemini_file_id') or meta.get('gemini_file_id')
+            gemini_store_id = doc_data.get('gemini_store_id') or meta.get('gemini_store_id')
             
             # Remove Gemini IDs from meta (now stored as separate columns)
             clean_meta = {k: v for k, v in meta.items() 
@@ -115,6 +115,7 @@ class SupabaseService:
                 'user_email': doc_data.get('user_email', ''),
                 'filename': doc_data['filename'],
                 'path': doc_data.get('path', ''),
+                'source': doc_data.get('source', 'manual'),  # Add source column
                 'gemini_file_id': gemini_file_id,  # Separate column (nullable)
                 'gemini_store_id': gemini_store_id,  # Separate column (nullable)
                 'meta': clean_meta,  # Cleaned meta without Gemini IDs
@@ -410,6 +411,42 @@ class SupabaseService:
         except Exception as e:
             log.error(f"Failed to upsert connection context for {source}: {e}")
             raise Exception(f"Failed to save connection context: {str(e)}")
+    
+    def get_user_gdocs_sync_with_count(self, user_id: str) -> Dict:
+        """
+        Get Google Docs sync status with document count.
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            Dict with {status, last_sync, docs_count}
+        """
+        if not self.is_enabled():
+            return {"status": None, "last_sync": None, "docs_count": 0}
+        
+        try:
+            # Get sync status from users table
+            sync_status, last_sync = self.get_user_sync_status(user_id, 'gdocs')
+            
+            # Count gdocs documents from doc_metadata table
+            response = (self.client.table('doc_metadata')
+                .select('id', count='exact')
+                .eq('user_id', user_id)
+                .eq('source', 'gdocs')
+                .execute())
+            
+            docs_count = response.count if hasattr(response, 'count') else 0
+            
+            return {
+                "status": sync_status,
+                "last_sync": last_sync,
+                "docs_count": docs_count
+            }
+            
+        except Exception as e:
+            log.error(f"Error getting gdocs sync status with count: {e}")
+            return {"status": None, "last_sync": None, "docs_count": 0}
 
 
 # Initialize global Supabase service instance

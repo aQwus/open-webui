@@ -13,6 +13,10 @@
 		checkNotionConnection,
 		getNotionSyncStatus,
 		triggerNotionSync,
+		initiateGDocsConnection,
+		checkGDocsConnection,
+		getGDocsSyncStatus,
+		triggerGDocsSync,
 		type ConnectionStatusResponse
 	} from '$lib/apis/connections';
 	import { user } from '$lib/stores';
@@ -28,12 +32,19 @@
 	let loading = false;
 	let connecting: { [key: string]: boolean } = {
 		attio: false,
-		notion: false
+		notion: false,
+		gdocs: false
 	};
 
 	// Sync status states
 	let syncStatuses: {
-		[key: string]: { status: string | null; last_sync: string | null; notes_count: number };
+		[key: string]: {
+			status: string | null;
+			last_sync: string | null;
+			notes_count?: number;
+			pages_count?: number;
+			docs_count?: number;
+		};
 	} = {};
 	let syncStatusPolling: ReturnType<typeof setInterval> | null = null;
 
@@ -55,6 +66,12 @@
 			name: 'Notion',
 			description: 'Import pages and databases from Notion',
 			icon: 'notion'
+		},
+		{
+			id: 'gdocs',
+			name: 'Google Docs',
+			description: 'Import documents from Google Drive',
+			icon: 'gdocs'
 		}
 	];
 
@@ -84,6 +101,8 @@
 			await connectAttio();
 		} else if (connectionId === 'notion') {
 			await connectNotion();
+		} else if (connectionId === 'gdocs') {
+			await connectGDocs();
 		}
 	};
 
@@ -310,6 +329,96 @@
 		}, 2000);
 	};
 
+	const connectGDocs = async () => {
+		connecting.gdocs = true;
+
+		try {
+			const response = await initiateGDocsConnection($user.token);
+
+			if (response.status === 'already_connected') {
+				toast.success($i18n.t('Google Docs is already connected'));
+				await loadConnectionStatus();
+				connecting.gdocs = false;
+				return;
+			}
+
+			const width = 600;
+			const height = 700;
+			const left = window.innerWidth / 2 - width / 2;
+			const top = window.innerHeight / 2 - height / 2;
+
+			popupWindow = window.open(
+				response.redirect_url,
+				'Google Docs OAuth',
+				`width=${width},height=${height},left=${left},top=${top}`
+			);
+
+			if (!popupWindow) {
+				toast.error($i18n.t('Please allow popups for this site'));
+				connecting.gdocs = false;
+				return;
+			}
+
+			startGDocsPolling();
+		} catch (error) {
+			console.error('Error initiating Google Docs connection:', error);
+			toast.error($i18n.t('Failed to initiate Google Docs connection'));
+			connecting.gdocs = false;
+		}
+	};
+
+	const startGDocsPolling = () => {
+		let pollCount = 0;
+		const maxPolls = 30;
+
+		pollingInterval = setInterval(async () => {
+			pollCount++;
+
+			if (popupWindow && popupWindow.closed) {
+				stopPolling();
+				toast.info($i18n.t('Authentication window closed'));
+				connecting.gdocs = false;
+				return;
+			}
+
+			try {
+				const status = await checkGDocsConnection($user.token);
+
+				if (status.connected) {
+					stopPolling();
+					toast.success($i18n.t('Google Docs connected successfully!'));
+					connecting.gdocs = false;
+
+					if (popupWindow && !popupWindow.closed) {
+						popupWindow.close();
+					}
+
+					await loadConnectionStatus();
+
+					setTimeout(async () => {
+						try {
+							await triggerGDocsSync($user.token);
+							console.log('Google Docs sync triggered successfully');
+							pollSyncStatus();
+						} catch (error) {
+							console.error('Error triggering Google Docs sync:', error);
+						}
+					}, 3000);
+				} else if (pollCount >= maxPolls) {
+					stopPolling();
+					toast.error($i18n.t('Connection timed out. Please try again.'));
+					connecting.gdocs = false;
+
+					if (popupWindow && !popupWindow.closed) {
+						popupWindow.close();
+					}
+				}
+			} catch (error) {
+				console.error('Error checking connection:', error);
+			}
+		}, 2000);
+	};
+
 	const pollSyncStatus = async () => {
 		// Poll sync status every 5 seconds for connected connections
 		if (connectionStatuses?.attio?.connected) {
@@ -364,6 +473,33 @@
 				}
 			} catch (error) {
 				console.error('Error loading Notion sync status:', error);
+			}
+		}
+
+		// Google Docs
+		if (connectionStatuses?.gdocs?.connected) {
+			try {
+				const status = await getGDocsSyncStatus($user.token);
+				syncStatuses['gdocs'] = status;
+
+				if (status.status === 'in_progress') {
+					if (!syncStatusPolling) {
+						syncStatusPolling = setInterval(async () => {
+							try {
+								const updatedStatus = await getGDocsSyncStatus($user.token);
+								syncStatuses['gdocs'] = updatedStatus;
+
+								if (updatedStatus.status !== 'in_progress') {
+									stopSyncPolling();
+								}
+							} catch (error) {
+								console.error('Error polling Google Docs sync status:', error);
+							}
+						}, 5000);
+					}
+				}
+			} catch (error) {
+				console.error('Error loading Google Docs sync status:', error);
 			}
 		}
 	};
@@ -476,6 +612,38 @@
 													d="M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952L12.21 19s0 .84-1.168.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.139c-.093-.514.28-.887.747-.933z"
 												/>
 											</svg>
+										{:else if connection.icon === 'gdocs'}
+											<!-- Google Docs icon -->
+											<svg
+												class="size-6"
+												viewBox="0 0 24 24"
+												fill="none"
+												xmlns="http://www.w3.org/2000/svg"
+											>
+												<path
+													d="M14 2H6C5.46957 2 4.96086 2.21071 4.58579 2.58579C4.21071 2.96086 4 3.46957 4 4V20C4 20.5304 4.21071 21.0391 4.58579 21.4142C4.96086 21.7893 5.46957 22 6 22H18C18.5304 22 19.0391 21.7893 19.4142 21.4142C19.7893 21.0391 20 20.5304 20 20V8L14 2Z"
+													fill="#4285F4"
+													stroke="#4285F4"
+													stroke-width="2"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+												/>
+												<path
+													d="M14 2V8H20"
+													fill="white"
+													stroke="white"
+													stroke-width="2"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+												/>
+												<path
+													d="M16 13H8M16 17H8M10 9H8"
+													stroke="white"
+													stroke-width="2"
+													stroke-linecap="round"
+													stroke-linejoin="round"
+												/>
+											</svg>
 										{/if}
 									</div>
 
@@ -497,9 +665,15 @@
 													</span>
 												{:else if syncStatuses[connection.id].status === 'success'}
 													<span class="text-green-600 dark:text-green-400">
-														✓ {syncStatuses[connection.id].notes_count} notes synced · Last: {formatDate(
-															syncStatuses[connection.id].last_sync
-														)}
+														✓
+														{#if connection.id === 'attio'}
+															{syncStatuses[connection.id].notes_count || 0} notes synced
+														{:else if connection.id === 'notion'}
+															{syncStatuses[connection.id].pages_count || 0} pages synced
+														{:else if connection.id === 'gdocs'}
+															{syncStatuses[connection.id].docs_count || 0} docs synced
+														{/if}
+														· Last: {formatDate(syncStatuses[connection.id].last_sync)}
 													</span>
 												{:else if syncStatuses[connection.id].status === 'failed'}
 													<span class="text-red-600 dark:text-red-400">

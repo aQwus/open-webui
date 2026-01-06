@@ -1,6 +1,6 @@
 import logging
 from typing import Optional
-from open_webui.config import COMPOSIO_API_KEY, ATTIO_AUTH_CONFIG_ID, NOTION_AUTH_CONFIG_ID
+from open_webui.config import COMPOSIO_API_KEY, ATTIO_AUTH_CONFIG_ID, NOTION_AUTH_CONFIG_ID, GDOCS_AUTH_CONFIG_ID
 
 log = logging.getLogger(__name__)
 
@@ -12,6 +12,7 @@ class ComposioService:
         self.api_key = COMPOSIO_API_KEY
         self.attio_auth_config_id = ATTIO_AUTH_CONFIG_ID
         self.notion_auth_config_id = NOTION_AUTH_CONFIG_ID
+        self.gdocs_auth_config_id = GDOCS_AUTH_CONFIG_ID
         self.client = None
         self._enabled = False
         
@@ -25,7 +26,7 @@ class ComposioService:
             # toolkit_versions parameter is supported in composio-core>=0.10.0
             self.client = Composio(
                 api_key=self.api_key,
-                toolkit_versions={"attio": "20251222_00", "notion": "20251222_01"}
+                toolkit_versions={"attio": "20251222_00", "notion": "20251222_01", "GOOGLEDOCS": "20260102_00"}
             )
             self._enabled = True
             log.info("Composio client initialized successfully")
