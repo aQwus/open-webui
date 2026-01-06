@@ -28,8 +28,26 @@
 	};
 
 	// Format timestamp to human readable date
-	const formatDate = (timestamp: number): string => {
-		const date = new Date(timestamp * 1000);
+	const formatDate = (dateInput: number | string): string => {
+		let date;
+		if (typeof dateInput === 'number') {
+			// Check if nanoseconds (approx > 1e16) vs milliseconds (approx > 1e11) vs seconds
+			if (dateInput > 1e16) {
+				// Nanoseconds -> Milliseconds
+				date = new Date(dateInput / 1000000);
+			} else if (dateInput > 1e11) {
+				// Milliseconds (already good)
+				date = new Date(dateInput);
+			} else {
+				// Seconds -> Milliseconds
+				date = new Date(dateInput * 1000);
+			}
+		} else {
+			// Try parsing string (ISO, etc)
+			date = new Date(dateInput);
+		}
+
+		if (isNaN(date.getTime())) return 'Invalid Date';
 		return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
 	};
 
@@ -43,7 +61,10 @@
 		try {
 			const result = await getDocuments($user.token);
 			if (result) {
-				documents = result;
+				// Filter out internal context files
+				documents = result.filter(
+					(doc) => !['attio_context', 'notion_context'].includes(doc.filename)
+				);
 			}
 		} catch (error) {
 			console.error('Error loading documents:', error);

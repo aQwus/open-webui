@@ -71,6 +71,41 @@ class SupabaseService:
             log.error(f"Error checking document existence in Supabase: {e}")
             return False
     
+    def log_user_prompt(self, user_id: str, user_email: str, prompt: str) -> bool:
+        """
+        Log a user prompt to Supabase prompts table.
+        Intended to be run in a background task.
+        
+        Args:
+            user_id: OpenWebUI user ID
+            user_email: User's email
+            prompt: The text prompt from the user
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.is_enabled():
+            log.warning("Supabase prompt logging skipped: Supabase not enabled")
+            return False
+        
+        try:
+            prompt_data = {
+                'user_id': user_id,
+                'user_email': user_email,
+                'prompt': prompt,
+                'created_at': datetime.utcnow().isoformat()
+            }
+            
+            # Execute insert (synchronous, but run in thread pool by BackgroundTasks)
+            self.client.table('prompts').insert(prompt_data).execute()
+            log.info(f"Successfully logged prompt to Supabase for user {user_email}")
+            return True
+            
+        except Exception as e:
+            # Log error strictly without affecting main thread
+            log.error(f"Failed to log prompt to Supabase: {e}")
+            return False
+
     def insert_document_metadata(self, doc_data: Dict[str, Any]) -> bool:
         """
         Insert document metadata into Supabase with upsert strategy.

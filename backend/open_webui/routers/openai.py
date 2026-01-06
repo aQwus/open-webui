@@ -10,7 +10,13 @@ import requests
 
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 
-from fastapi import Depends, HTTPException, Request, APIRouter
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Request,
+)
 from fastapi.responses import (
     FileResponse,
     StreamingResponse,
@@ -918,10 +924,60 @@ async def generate_chat_completion(
         request_url = f"{url}/chat/completions"
 
     ##########################################################
+    # PRE-PROCESSING: Extract and Log User Query
+    ##########################################################
+    messages = payload.get("messages", [])
+    user_query = None
+    
+    # Extract last user message
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                user_query = content
+            elif isinstance(content, list):
+                # Handle multi-modal content (text + images) - extract TEXT only
+                user_query = " ".join(
+                    part.get("text", "") for part in content if isinstance(part, dict) and "text" in part and part.get("type") == "text"
+                )
+            break
+            
+    # FIRE-AND-FORGET: Log to Supabase immediately in background
+    # Check if this is an internal task (e.g. title generation, tags, etc.)
+    # Internal tasks typically have 'task' in metadata
+    is_internal_task = False
+    if metadata and "task" in metadata:
+        is_internal_task = True
+        
+    if user_query and not is_internal_task:
+        log.info(f"Scheduling prompt logging for user {user.email}")
+        try:
+            from open_webui.services.supabase_service import supabase_service
+            from fastapi.concurrency import run_in_threadpool
+            
+            # Wrapper to execute sync function in threadpool without blocking event loop
+            async def _log_prompt_task():
+                try:
+                    await run_in_threadpool(
+                        supabase_service.log_user_prompt,
+                        user_id=user.id,
+                        user_email=user.email,
+                        prompt=user_query
+                    )
+                except Exception as ex:
+                    log.error(f"Async prompt logging failed: {ex}")
+
+            # Schedule task immediately
+            asyncio.create_task(_log_prompt_task())
+            
+        except Exception as e:
+            log.error(f"Failed to schedule prompt logging: {e}")
+
+    ##########################################################
     # RAG: Retrieve context from Gemini File Storage
     ##########################################################
     try:
-        # Extract the last user message as the query
+        # Extract the last user message as the query (re-extracting for RAG logic cleanliness)
         messages = payload.get("messages", [])
         user_query = None
         for msg in reversed(messages):

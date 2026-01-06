@@ -2328,7 +2328,8 @@ ext_page_token\.
 **Problem:** Backend raised \HTTPException\ because \GDOCS_AUTH_CONFIG_ID\ was missing.
 **Solution:**
 *   Added \GDOCS_AUTH_CONFIG_ID\ to \.env\ and \config.py\.
-*   Improved error logging in \outers/connections.py\ to explicitly log when this variable is missing.
+*   Improved error logging in \
+outers/connections.py\ to explicitly log when this variable is missing.
 
 #### Issue 9.5: Missing Metadata in Supabase
 **Problem:** Rows created in \doc_metadata\ had empty \gemini_file_id\, \gemini_store_id\, and \source\ columns.
@@ -2356,7 +2357,9 @@ ext_page_token\.
 otion\) explicitly set their respective sources.
 
 ### Agent Tool Usage & Response Structure
-*   **Tools:** The agent uses tools like \iew_file\, \eplace_file_content\, \un_command\ (for Docker), and \grep_search\.
+*   **Tools:** The agent uses tools like \iew_file\, \
+eplace_file_content\, \
+un_command\ (for Docker), and \grep_search\.
 *   **Pattern:**
     1.  **Validation:** Always verify file content before editing.
     2.  **Atomic Edits:** Make specific, targeted changes rather than rewriting huge files to avoid context loss.
@@ -2364,3 +2367,44 @@ otion\) explicitly set their respective sources.
     4.  **Feedback Loop:** Use \
 otify_user\ to communicate requires actions (like checking \.env\ vars) that the agent cannot do itself.
 
+
+## Phase 10: Prompt Logging & UI Enhancements
+
+### Goal
+Log all user-typed prompts to a Supabase `prompts` table for analytics, without blocking the chat UI or logging internal system prompts (e.g., title generation). Also, fix UI issues in the Documents list.
+
+### Implementation Details
+*   **Database:**
+    *   Used Supabase `prompts` table.
+    *   **Crucial Schema Change:** Changed PK from `user_id` to a unique `id` (UUID) to allow multiple prompts per user.
+*   **Backend (`openai.py`):**
+    *   **Non-blocking Logging:** Replaced `BackgroundTasks` (which caused crashes on internal calls) with `asyncio.create_task` + `run_in_threadpool`. This ensures logging happens in the background without affecting response latency.
+    *   **Prompt Extraction:** Logic added to `generate_chat_completion` to extract the last user message.
+    *   **Internal Task Filtering:** Added logic to check `metadata` for `task` key (e.g., `title_generation`, `tags_generation`).
+        *   **Fix:** Initially checked `payload['metadata']` (which was popped), corrected to check the `metadata` variable directly.
+*   **Service (`supabase_service.py`):**
+    *   Added `log_user_prompt(user_id, user_email, prompt)` method.
+    *   Added error handling to ensure chat continues even if logging fails.
+*   **Frontend (`DocumentsModal.svelte`):**
+    *   **Date Fix:** Backend returns nanoseconds (e.g., `173618...`), but JS `Date` expects ms. Added smart check: `if (timestamp > 1e16) timestamp / 1e6`.
+    *   **Filtering:** Filtered out internal context files (`attio_context`, `notion_context`) from the document list.
+
+### Issues Encountered & Fixes
+
+#### Issue 10.1: Crash on Internal Manual Calls
+**Problem:** `generate_chat_completion` crashed with `TypeError` when called manually (e.g., by `tasks.py`) because `background_tasks` dependency was missing.
+**Solution:**
+*   Removed `BackgroundTasks` dependency injection.
+*   Switched to `asyncio.create_task` which works in all contexts (API and internal).
+
+#### Issue 10.2: System Prompts Being Logged
+**Problem:** Auto-generated prompts like "Generate a concise title..." were polluting the logs.
+**Cause:** My initial filter checked `payload['metadata']`, but `metadata` is `pop()`'d from payload at the start of the function.
+**Solution:**
+*   Changed filter condition to check the `metadata` local variable: `if metadata and 'task' in metadata: skip`.
+
+#### Issue 10.3: Supabase "Duplicate Key" Error
+**Problem:** Logging failed with `duplicate key value violates unique constraint "prompts_pkey"`.
+**Cause:** The `prompts` table used `user_id` as the Primary Key, allowing only ONE prompt per user.
+**Solution:**
+*   User altered table schema to use a dedicated `uuid` column as PK.
