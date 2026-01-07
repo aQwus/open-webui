@@ -264,7 +264,14 @@
 												{document.filename}
 											</p>
 											<p class="text-xs text-gray-500 dark:text-gray-400">
-												{formatFileSize(document.size)} • {formatDate(document.created_at)}
+												{#if document.source === 'notion'}
+													{$i18n.t('Notion')}
+												{:else if document.source === 'gdocs'}
+													{$i18n.t('Google Docs')}
+												{:else}
+													{formatFileSize(document.size)}
+												{/if}
+												• {formatDate(document.created_at)}
 											</p>
 										</div>
 									</div>

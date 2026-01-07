@@ -151,6 +151,7 @@ class SupabaseService:
                 'filename': doc_data['filename'],
                 'path': doc_data.get('path', ''),
                 'source': doc_data.get('source', 'manual'),  # Add source column
+                'doc_id': doc_data.get('doc_id'),  # Add doc_id column
                 'gemini_file_id': gemini_file_id,  # Separate column (nullable)
                 'gemini_store_id': gemini_store_id,  # Separate column (nullable)
                 'meta': clean_meta,  # Cleaned meta without Gemini IDs
@@ -482,6 +483,42 @@ class SupabaseService:
         except Exception as e:
             log.error(f"Error getting gdocs sync status with count: {e}")
             return {"status": None, "last_sync": None, "docs_count": 0}
+            
+    def get_user_notion_sync_with_count(self, user_id: str) -> Dict:
+        """
+        Get Notion sync status with page count (counting individual pages).
+        
+        Args:
+            user_id: User ID
+            
+        Returns:
+            Dict with {status, last_sync, pages_count}
+        """
+        if not self.is_enabled():
+            return {"status": None, "last_sync": None, "pages_count": 0}
+        
+        try:
+            # Get sync status from users table
+            sync_status, last_sync = self.get_user_sync_status(user_id, 'notion')
+            
+            # Count notion pages from doc_metadata table
+            response = (self.client.table('doc_metadata')
+                .select('id', count='exact')
+                .eq('user_id', user_id)
+                .eq('source', 'notion')
+                .execute())
+            
+            pages_count = response.count if hasattr(response, 'count') else 0
+            
+            return {
+                "status": sync_status,
+                "last_sync": last_sync,
+                "pages_count": pages_count
+            }
+            
+        except Exception as e:
+            log.error(f"Error getting notion sync status with count: {e}")
+            return {"status": None, "last_sync": None, "pages_count": 0}
 
 
 # Initialize global Supabase service instance

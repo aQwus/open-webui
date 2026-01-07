@@ -994,6 +994,9 @@
 					name={$i18n.t('Connections')}
 					chevron={false}
 					dragAndDrop={false}
+					onClick={() => {
+						showConnectionsModal = true;
+					}}
 					onAdd={() => {
 						showConnectionsModal = true;
 					}}
@@ -1009,6 +1012,9 @@
 					name={$i18n.t('Documents')}
 					chevron={false}
 					dragAndDrop={false}
+					onClick={() => {
+						showDocumentsModal = true;
+					}}
 					onAdd={() => {
 						showDocumentsModal = true;
 					}}
@@ -1023,6 +1029,9 @@
 						className="px-2 mt-0.5"
 						name={$i18n.t('Folders')}
 						chevron={false}
+						onClick={() => {
+							showCreateFolderModal = true;
+						}}
 						onAdd={() => {
 							showCreateFolderModal = true;
 						}}

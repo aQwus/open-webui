@@ -56,12 +56,6 @@
 	// Available connections list
 	const connections = [
 		{
-			id: 'attio',
-			name: 'Attio',
-			description: 'Sync contacts and conversations from Attio',
-			icon: 'attio'
-		},
-		{
 			id: 'notion',
 			name: 'Notion',
 			description: 'Import pages and databases from Notion',
@@ -78,7 +72,6 @@
 	// Load connection status when modal opens
 	$: if (show) {
 		loadConnectionStatus();
-		pollSyncStatus();
 	} else {
 		stopSyncPolling();
 	}
@@ -88,6 +81,8 @@
 		try {
 			const status = await getConnectionStatus($user.token);
 			connectionStatuses = status;
+			// Loop through connected services and fetch their sync status immediately
+			pollSyncStatus();
 		} catch (error) {
 			console.error('Error loading connection status:', error);
 			toast.error($i18n.t('Failed to load connection status'));

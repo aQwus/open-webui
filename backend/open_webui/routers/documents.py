@@ -381,6 +381,7 @@ async def list_documents(user=Depends(get_verified_user)):
                 "filename": meta.get("name", doc['filename']),
                 "size": meta.get("size", 0),
                 "content_type": meta.get("content_type", ""),
+                "source": doc.get('source', 'manual'),
                 "created_at": doc['created_at'],
                 "updated_at": doc['updated_at'],
             })

@@ -123,146 +123,214 @@ class NotionSyncService:
             
             log.info("Step 1/5: Fetched %d page(s) from Notion", pages_count)
             
-            # Step 2: Create context file for Gemini
-            log.info("Step 2/5: Creating context file for Gemini")
-            temp_file_path = self._create_gemini_context_file(pages_data)
-            log.info("Step 2/5: Created temp file: %s", temp_file_path)
-            
-            # Step 3: Get or create Gemini store
-            log.info("Step 3/5: Getting Gemini store")
+            # Step 2: Get Gemini store (shared across all docs)
+            log.info("Step 2/5: Getting Gemini store")
             gemini_store_id = self._get_or_create_user_store(openwebui_user_id)
-            log.info("Step 3/5: Using Gemini store: %s", gemini_store_id)
+            log.info("Step 2/5: Using Gemini store: %s", gemini_store_id)
             
-            # Step 4: Upload to Gemini File Storage
-            log.info("Step 4/5: Uploading to Gemini File Storage")
-            gemini_result = self.gemini.upload_file_to_gemini(
-                file_path=temp_file_path,
-                filename="notion_context.txt",
-                user_id=openwebui_user_id,
-                document_id=str(uuid.uuid4())
-            )
-            
-            if not gemini_result:
-                raise Exception("Gemini upload failed")
-            
-            gemini_file_id, gemini_store_id = gemini_result
-            log.info("Step 4/5: Uploaded to Gemini: %s", gemini_file_id)
-            
-            # Step 5: Save metadata to Supabase
-            log.info("Step 5/5: Saving metadata to Supabase")
-            
-            # Get connection_id from connection status
+            # Step 3: Get connection_id for metadata
             connection_status = self.composio.check_connection_status(notion_user_id, self.composio.notion_auth_config_id)
             connection_id = connection_status.get('connection_id', '')
             
-            self.supabase.upsert_connection_context_metadata(
-                user_id=openwebui_user_id,
-                user_email=user_email,
-                source='notion',
-                gemini_file_id=gemini_file_id,
-                gemini_store_id=gemini_store_id,
-                connection_id=connection_id,
-                count=pages_count
-            )
-            log.info("Step 5/5: Saved metadata to Supabase")
+            # Step 4: Process each page individually
+            log.info("Step 3/5: Processing and uploading pages")
+            successful_uploads = 0
+            failed_uploads = 0
             
-            # Update sync status to success
-            self.supabase.update_user_sync_status(openwebui_user_id, 'notion', 'success')
+            for idx, page in enumerate(pages_data):
+                try:
+                    page_id = page['page_id']
+                    page_title = page['title']
+                    page_content = page['content']
+                    created_time = page.get('created_time')
+                    last_edited_time = page.get('last_edited_time')
+                    
+                    log.debug("Processing page %d/%d: %s", idx + 1, pages_count, page_title)
+                    
+                    # Create temp file for THIS page only
+                    temp_file_path = self._create_page_file(page_title, page_content)
+                    
+                    try:
+                        # Upload to Gemini (unique file per page)
+                        gemini_result = self.gemini.upload_file_to_gemini(
+                            file_path=temp_file_path,
+                            filename=f"notion_{page_id}.txt",
+                            user_id=openwebui_user_id,
+                            document_id=str(uuid.uuid4())
+                        )
+                        
+                        if not gemini_result:
+                            raise Exception("Gemini upload failed")
+                        
+                        gemini_file_id, _ = gemini_result
+                        
+                        # Save metadata to Supabase (individual row)
+                        self.supabase.insert_document_metadata({
+                            'id': str(uuid.uuid4()),
+                            'user_id': openwebui_user_id,
+                            'user_email': user_email,
+                            'filename': page_title,
+                            'path': '',  # No R2 storage
+                            'source': 'notion',
+                            'gemini_file_id': gemini_file_id,
+                            'gemini_store_id': gemini_store_id,
+                            'doc_id': page_id,  # New column for Notion page ID
+                            'meta': {
+                                'connection_id': connection_id,
+                                'created_time': created_time,
+                                'last_edited_time': last_edited_time,
+                            }
+                        })
+                        
+                        successful_uploads += 1
+                        
+                    finally:
+                        # Cleanup temp file
+                        if temp_file_path and os.path.exists(temp_file_path):
+                            try:
+                                os.remove(temp_file_path)
+                            except Exception as e:
+                                log.warning("Failed to cleanup temp file: %s", e)
+                                
+                except Exception as page_error:
+                    failed_uploads += 1
+                    log.error(f"Failed to upload page {page['title']}: {page_error}")
+                    continue  # Continue with next page
             
-            # Cleanup temp file
-            try:
-                os.unlink(temp_file_path)
-            except Exception as e:
-                log.warning("Failed to cleanup temp file: %s", e)
+            # Update sync status
+            final_status = 'success' if successful_uploads > 0 else 'failed'
+            if successful_uploads == 0 and pages_count > 0:
+                 final_status = 'failed'
             
-            log.info("Notion sync completed successfully: %d pages synced", pages_count)
-            return {"status": "success", "pages_count": pages_count, "error": None}
+            self.supabase.update_user_sync_status(openwebui_user_id, 'notion', final_status)
+            
+            log.info("Notion sync completed: %d succeeded, %d failed", successful_uploads, failed_uploads)
+            return {"status": final_status, "pages_count": successful_uploads, "error": None}
             
         except Exception as e:
             log.error("Notion sync failed: %s", e, exc_info=True)
             self.supabase.update_user_sync_status(openwebui_user_id, 'notion', 'failed')
-            
-            # Cleanup uploaded file if it exists
-            if 'gemini_file_id' in locals():
-                try:
-                    self.gemini.delete_file(gemini_file_id)
-                    log.info("Cleaned up Gemini file after failure")
-                except Exception as cleanup_error:
-                    log.error("Failed to cleanup Gemini file: %s", cleanup_error)
-            
             return {"status": "failed", "pages_count": 0, "error": str(e)}
 
     @handle_rate_limit
     def _fetch_all_pages_from_notion(self, notion_user_id: str) -> Tuple[List[Dict], int]:
         """
-        Fetch all pages from Notion workspace and their content.
+        Fetch all top-level pages from Notion workspace using search with pagination.
         
         Returns:
             Tuple of (pages_data, total_pages_count)
-            pages_data: List of {page_id, title, content}
+            pages_data: List of {page_id, title, content, created_time, last_edited_time}
         """
-        log.info("Fetching pages from Notion workspace")
+        log.info("Fetching pages from Notion workspace using search")
+        
+        pages_data = []
+        next_cursor = None
+        has_more = True
         
         try:
-            # Fetch pages using NOTION_FETCH_DATA
-            pages_response = self.composio.client.tools.execute(
-                "NOTION_FETCH_DATA",
-                user_id=notion_user_id,
-                arguments={
-                    "get_databases": False,
-                    "get_pages": True,
-                    "page_size": NOTION_LIST_LIMIT
+            while has_more:
+                arguments = {
+                    "direction": "descending",
+                    "page_size": 100
                 }
-            )
-            
-            if not pages_response.get("successful"):
-                error_msg = pages_response.get("error", "Unknown error")
-                raise Exception(f"Failed to fetch pages from Notion: {error_msg}")
-            
-            # Extract pages from response
-            values = pages_response.get("data", {}).get("values", [])
-            results = pages_response.get("data", {}).get("results", [])
-            
-            if not values:
-                log.info("No pages found in Notion workspace")
-                return ([], 0)
-            
-            log.info("Found %d pages in Notion workspace", len(values))
-            
-            # Process each page
-            pages_data = []
-            for idx, value in enumerate(values):
-                page_id = value.get("id")
-                page_title = value.get("title", "Untitled")
+                if next_cursor:
+                    arguments["start_cursor"] = next_cursor
+
+                # Search for pages
+                search_response = self.composio.client.tools.execute(
+                    "NOTION_SEARCH_NOTION_PAGE",
+                    user_id=notion_user_id,
+                    arguments=arguments
+                )
                 
-                # Find corresponding result to check archived/in_trash status
-                page_result = next((r for r in results if r.get("id") == page_id), {})
+                if not search_response.get("successful"):
+                    error_msg = search_response.get("error", "Unknown error")
+                    raise Exception(f"Failed to fetch pages from Notion: {error_msg}")
                 
-                # Skip archived or trashed pages
-                if page_result.get("archived", False) or page_result.get("in_trash", False):
-                    log.debug("Skipping archived/trashed page: %s", page_title)
-                    continue
+                data = search_response.get("data", {})
+                results = data.get("results", [])
                 
-                log.debug("Fetching content for page: %s (ID: %s)", page_title, page_id)
+                # Update pagination cursors
+                has_more = data.get("has_more", False)
+                next_cursor = data.get("next_cursor")
                 
-                try:
-                    # Add delay between page content fetches to avoid rate limiting
-                    if idx > 0:  # Don't delay before first page
-                        time.sleep(NOTION_RATE_LIMIT_DELAY)
+                if not results:
+                    # If results are empty but has_more is true (rare), just break to avoid infinite loop
+                    if has_more and not results:
+                         log.warning("Notion returned has_more=True but empty results. Stopping pagination.")
+                         break
+                    if not has_more:
+                        break
+                
+                log.info(f"Fetched batch of {len(results)} items from Notion")
+
+                for page in results:
+                    # We only want pages, not databases
+                    if page.get("object") != "page":
+                        continue
+
+                    # Filter: Only process top-level pages (parent type is workspace)
+                    # Use 'workspace' string check - safe even if parent dict is missing
+                    parent = page.get("parent", {})
+                    # For some pages parent might be workspace: True or just type: workspace
+                    is_workspace_parent = parent.get("type") == "workspace" or parent.get("workspace") is True
                     
-                    page_content = self._fetch_page_content(notion_user_id, page_id, page_title)
-                    pages_data.append({
-                        "page_id": page_id,
-                        "title": page_title,
-                        "content": page_content
-                    })
-                except Exception as page_error:
-                    log.warning("Error fetching content for page %s: %s", page_title, page_error)
-                    continue
+                    if not is_workspace_parent:
+                        # Skip child pages (they will be fetched recursively via content fetch of the parent)
+                        continue
+
+                    page_id = page.get("id")
+                    
+                    # Check archived/trash status
+                    if page.get("archived", False) or page.get("in_trash", False):
+                        continue
+
+                    # TITLE EXTRACTION (Robust handling for nested properties)
+                    page_title = "Untitled"
+                    try:
+                        props = page.get("properties", {})
+                        # Search for property of type 'title'
+                        title_prop = None
+                        if "title" in props and props["title"].get("type") == "title":
+                            title_prop = props["title"]
+                        else:
+                            # Fallback: search values for type 'title'
+                            for val in props.values():
+                                if val.get("type") == "title":
+                                    title_prop = val
+                                    break
+                        
+                        if title_prop:
+                            title_array = title_prop.get("title", [])
+                            if title_array and len(title_array) > 0:
+                                page_title = title_array[0].get("plain_text", "Untitled")
+                    except Exception as e:
+                        log.warning(f"Error extracting title for page {page_id}: {e}")
+
+                    # Fetch content for this top-level page
+                    log.debug("Fetching content for page: %s (ID: %s)", page_title, page_id)
+                    try:
+                         # Fetch page content (recursive, so it gets children too)
+                        page_content = self._fetch_page_content(notion_user_id, page_id, page_title)
+                        
+                        pages_data.append({
+                            "page_id": page_id,
+                            "title": page_title,
+                            "content": page_content,
+                            "created_time": page.get("created_time"),
+                            "last_edited_time": page.get("last_edited_time")
+                        })
+                        
+                        # Add a small delay between content fetches to be safe
+                        time.sleep(NOTION_RATE_LIMIT_DELAY)
+                        
+                    except Exception as page_error:
+                        log.warning("Error fetching content for page %s: %s", page_title, page_error)
+                        continue
             
-            log.info("Successfully fetched content for %d pages", len(pages_data))
+            log.info("Successfully fetched %d top-level pages from Notion", len(pages_data))
             return (pages_data, len(pages_data))
-            
+
         except Exception as e:
             error_str = str(e)
             # Handle "No connected account" error - preserve error code for retry logic
@@ -373,12 +441,13 @@ class NotionSyncService:
         
         return "\n\n".join(page_text_parts)
 
-    def _create_gemini_context_file(self, pages_data: List[Dict]) -> str:
+    def _create_page_file(self, page_title: str, page_content: str) -> str:
         """
-        Create a single text file combining all Notion pages.
+        Create a temporary file for a single Notion page.
         
         Args:
-            pages_data: List of {page_id, title, content}
+            page_title: Page title
+            page_content: Full page content (already formatted with title)
         
         Returns:
             Path to temporary file
@@ -391,24 +460,16 @@ class NotionSyncService:
         )
         
         try:
-            for i, page in enumerate(pages_data):
-                # Write page content
-                temp_file.write(page["content"])
-                
-                # Add separator between pages (except after last page)
-                if i < len(pages_data) - 1:
-                    temp_file.write("\n\n---\n\n")
-            
+            temp_file.write(page_content)
             temp_file.close()
             return temp_file.name
-            
         except Exception as e:
             temp_file.close()
             try:
                 os.unlink(temp_file.name)
             except:
                 pass
-            raise Exception(f"Failed to create context file: {e}")
+            raise Exception(f"Failed to create page file for '{page_title}': {e}")
 
 
     def _get_or_create_user_store(self, openwebui_user_id: str) -> str:

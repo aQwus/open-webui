@@ -128,6 +128,7 @@ class GDocsSyncService:
                             'source': 'gdocs',
                             'gemini_file_id': gemini_file_id,
                             'gemini_store_id': gemini_store_id,
+                            'doc_id': doc_id,  # Add doc_id column
                             'meta': {
                                 'createdTime': created_time,
                                 'modifiedTime': modified_time,

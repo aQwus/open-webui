@@ -1909,16 +1909,22 @@ Discussed project timeline...
 
 **Composio Tool Calls:**
 ```python
-# 1. Fetch Pages
-NOTION_FETCH_DATA(
-    get_databases=False,
-    get_pages=True,
+# 1. Fetch Pages (Recursive Search)
+NOTION_SEARCH_NOTION_PAGE(
+    query="",
     page_size=100
 )
 # Returns: {
 #   data: {
-#     values: [{id, title}],
-#     results: [{id, archived, in_trash}]
+#     results: [{
+#       id, 
+#       properties: {title: ...},
+#       parent: {type: 'workspace' | 'page_id'},
+#       created_time,
+#       last_edited_time
+#     }],
+#     has_more: bool,
+#     next_cursor: str
 #   }
 # }
 
@@ -1972,6 +1978,11 @@ def _fetch_page_content(...):
 - HTTP 429
 - "rate limit" in error message
 - "too many requests" in error message
+
+# Logic Changes (Refactor):
+# - **Pagination:** Now loops through `next_cursor` until `has_more` is False.
+# - **Recursive Fetching:** Filters for top-level pages (`parent.type == 'workspace'`) and recursively processes children.
+# - **Metadata:** Extracts `created_time` and `last_edited_time` directly from search results.
 
 ### Storage and Metadata
 
@@ -2166,6 +2177,8 @@ except Exception as e:
 7. Call `/trigger-sync` endpoint
 8. Poll `/sync-status` endpoint for progress
 
+**Note:** Attio is currently **hidden** from the Connections modal UI (removed from `connections` array) per user request, but all backend logic and endpoints remain fully functional.
+
 **Key Pattern:**
 ```javascript
 // Delay before triggering sync
@@ -2300,7 +2313,7 @@ ext_page_token\.
     *   **Rate Limiting:** Implements retry logic with exponential backoff for 429 errors.
     *   **Connection Propagation:** Retries on 1803 (\No connected account\) errors to allow time for OAuth propagation.
 *   **Metadata Storage:**
-    *   Stores \gemini_file_id\, \gemini_store_id\, \source='gdocs'\ in Supabase \doc_metadata\ table.
+    *   Stores \gemini_file_id\, \gemini_store_id\, \doc_id\, \source='gdocs'\ in Supabase \doc_metadata\ table.
 
 ### Issues Encountered & Fixes
 

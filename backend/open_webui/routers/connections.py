@@ -383,16 +383,11 @@ async def get_notion_sync_status(user=Depends(get_verified_user)):
         pages_count: Number of pages synced
     """
     try:
-        # Get sync status from users table
-        sync_status, last_sync = supabase_service.get_user_sync_status(user.id, 'notion')
-        
-        # Get metadata from connection_context_metadata
-        metadata = supabase_service.get_connection_context_metadata(user.id, 'notion')
-        
+        result = supabase_service.get_user_notion_sync_with_count(user.id)
         return {
-            "status": sync_status or "not_started",
-            "last_sync": last_sync,
-            "pages_count": metadata.get('count', 0) if metadata else 0
+            "status": result.get("status") or "not_started",
+            "last_sync": result.get("last_sync"),
+            "pages_count": result.get("pages_count", 0)
         }
         
     except Exception as e:
